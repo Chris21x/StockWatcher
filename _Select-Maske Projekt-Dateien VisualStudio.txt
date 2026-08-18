@@ -1,0 +1,1 @@
+*.sln;*.csproj;*.props;*.targets;*.config;*.xml;*.json;*.cs;*.vb;*.resx;*.xsd;*.wsdl;*.settings;*.manifest;*.sql;*.txt;*.md;*.ico
