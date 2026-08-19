@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
@@ -27,6 +27,7 @@ namespace StockWatcher
 		private ToolStrip _toolStrip;
 		private StatusStrip _statusStrip;
 		private ToolStripStatusLabel _lblStatus;
+		private ToolStripStatusLabel _lblPortfolioSummary;
 		private ToolStripStatusLabel _lblNextUpdate;
 		private System.Windows.Forms.Timer _timer;
 		private System.Windows.Forms.Timer _countdownTimer;
@@ -45,6 +46,14 @@ namespace StockWatcher
 		private bool _fetchRunning = false;
 		private DateTime _nextFetchTime = DateTime.MinValue;
 		private bool _restoringLayout = false;
+		private double? _previousPortfolioMarketValueEur = null;
+		private string _portfolioTrendIndicator = "◀▶";
+		private readonly Dictionary<WatchlistEntry, string> _priceTrendIndicators =
+			new Dictionary<WatchlistEntry, string>();
+		private readonly Dictionary<WatchlistEntry, int> _priceTrendDirections =
+			new Dictionary<WatchlistEntry, int>();
+		private readonly Dictionary<WatchlistEntry, int> _priceTrendCounts =
+			new Dictionary<WatchlistEntry, int>();
 
 		// Icons
 		private Icon _baseIcon;
@@ -72,6 +81,9 @@ namespace StockWatcher
 			BuildTrayIcon();
 			RefreshListView();
 			StartTimers();
+
+			if (_settings.StartMinimized)
+				WindowState = FormWindowState.Minimized;
 
 			_ = FetchAllQuotesAsync();
 		}
@@ -147,18 +159,21 @@ namespace StockWatcher
 				Font = new Font("Consolas", 9.5f),
 				AllowColumnReorder = true
 			};
-			_listView.Columns.Add("Name",     160);
-			_listView.Columns.Add("ISIN",     120);
-			_listView.Columns.Add("Kurs",     170);
-			_listView.Columns.Add("Stk.",      55);
-			_listView.Columns.Add("Kauf-/Referenzkurs", 130);
-			_listView.Columns.Add("Diff €",  105);
-			_listView.Columns.Add("Diff %",    75);
-			_listView.Columns.Add("Lmt ▲", 80);
-			_listView.Columns.Add("Lmt ▼", 80);
-			_listView.Columns.Add("Status",   140);
-			_listView.Columns.Add("Typ",      105);
-			_listView.Columns.Add("Bemerkung", 360);
+			_listView.Columns.Add("Name", 240);
+			_listView.Columns.Add("ISIN", 120);
+			_listView.Columns.Add("Stk.", 55);
+			_listView.Columns.Add("Kauf-/Referenzkurs", 140);
+			_listView.Columns.Add("Kauf-/Referenzwert", 150);
+			_listView.Columns.Add("▲▼", 45, HorizontalAlignment.Center);
+			_listView.Columns.Add("Akt. Kurs", 130);
+			_listView.Columns.Add("Marktwert", 135);
+			_listView.Columns.Add("Diff. EUR", 105);
+			_listView.Columns.Add("Diff. %", 80);
+			_listView.Columns.Add("Limit ▼", 110);
+			_listView.Columns.Add("Limit ▲", 110);
+			_listView.Columns.Add("Eintragsart", 105);
+			_listView.Columns.Add("Bemerkung", 300);
+			_listView.Columns.Add("Status", 160); 
 			_disabledLimitFont = new Font(_listView.Font, FontStyle.Italic);
 			_listView.ListViewItemSorter = _sorter;
 			_listView.DoubleClick += (s, e) => OpenEditDialog();
@@ -177,15 +192,26 @@ namespace StockWatcher
 			// Statusleiste
 			_lblStatus = new ToolStripStatusLabel("Bereit")
 			{
-				Spring = true,
+				Spring = false,
+				TextAlign = ContentAlignment.MiddleLeft
+			};
+			_lblPortfolioSummary = new ToolStripStatusLabel("| ◀▶ | 0 Pos. | – EUR | – EUR")
+			{
+				Spring = false,
 				TextAlign = ContentAlignment.MiddleLeft
 			};
 			_lblNextUpdate = new ToolStripStatusLabel("Nächster Abruf: –")
 			{
+				Spring = true,
 				TextAlign = ContentAlignment.MiddleRight
 			};
 			_statusStrip = new StatusStrip();
-			_statusStrip.Items.AddRange(new ToolStripItem[] { _lblStatus, _lblNextUpdate });
+			_statusStrip.Items.AddRange(new ToolStripItem[]
+			{
+				_lblStatus,
+				_lblPortfolioSummary,
+				_lblNextUpdate
+			});
 
 			// Reihenfolge in Controls entscheidet über Dock-Anordnung (letzte = unten/aussen)
 			Controls.Add(_listView);      // Fill – wird als letztes platziert
@@ -271,11 +297,14 @@ namespace StockWatcher
 			if (string.IsNullOrWhiteSpace(_settings.ColumnWidths)) return;
 
 			string[] parts = _settings.ColumnWidths.Split(',');
-			int count = Math.Min(parts.Length, _listView.Columns.Count);
+
+			// Bei geänderter Spaltenstruktur bewusst das neue Default-Layout verwenden.
+			if (parts.Length != _listView.Columns.Count) return;
+
 			_restoringLayout = true;
 			try
 			{
-				for (int i = 0; i < count; i++)
+				for (int i = 0; i < parts.Length; i++)
 				{
 					if (int.TryParse(parts[i].Trim(), NumberStyles.Integer,
 						CultureInfo.InvariantCulture, out int width) && width > 0)
@@ -395,10 +424,10 @@ namespace StockWatcher
 		{
 			if (string.IsNullOrWhiteSpace(_settings.ColumnOrder)) return;
 			string[] parts = _settings.ColumnOrder.Split(',');
-			// Alte Layouts mit 10 Spalten bleiben gültig; die neuen Spalten Typ/Bemerkung
-			// werden in diesem Fall rechts angehängt.
-			if (parts.Length != _listView.Columns.Count &&
-				parts.Length != _listView.Columns.Count - 2) return;
+
+			// Bei geänderter Spaltenstruktur bewusst das neue Default-Layout verwenden.
+			if (parts.Length != _listView.Columns.Count) return;
+
 			try
 			{
 				// Aufsteigend nach Ziel-DisplayIndex setzen, um Konflikte zu vermeiden
@@ -408,11 +437,16 @@ namespace StockWatcher
 					if (!int.TryParse(parts[i].Trim(), out int d)) return;
 					pairs.Add((i, d));
 				}
+
 				pairs.Sort((a, b) => a.disp.CompareTo(b.disp));
+
 				foreach (var (col, disp) in pairs)
 					_listView.Columns[col].DisplayIndex = disp;
 			}
-			catch { /* Fehler beim Wiederherstellen ignorieren */ }
+			catch
+			{
+				/* Fehler beim Wiederherstellen ignorieren */
+			}
 		}
 
 		// -----------------------------------------------------------------------
@@ -491,7 +525,8 @@ namespace StockWatcher
 				await FetchQuoteIntoEntry(entry);
 			}
 
-			RefreshListView();
+			_settings.Save();
+			RefreshListView(updatePortfolioTrend: true);
 			_lblStatus.Text = $"Zuletzt aktualisiert: {DateTime.Now:HH:mm:ss}";
 			_fetchRunning = false;
 		}
@@ -499,6 +534,7 @@ namespace StockWatcher
 		private async Task FetchSingleAsync(WatchlistEntry entry)
 		{
 			await FetchQuoteIntoEntry(entry);
+			_settings.Save();
 			RefreshListView();
 		}
 
@@ -521,6 +557,11 @@ namespace StockWatcher
 			QuoteResult result = await _client.GetQuoteAsync(entry.Isin, entry.YahooSymbol);
 			if (result.Success)
 			{
+				double previousDisplayedPrice = GetDisplayedPriceForTrend(entry);
+
+				entry.QuoteFetchAttemptedThisSession = true;
+				entry.LastSuccessfulQuoteFetch = DateTime.Now;
+				entry.DataRetrievalFailureSince = DateTime.MinValue;
 				entry.LookupFailCount = 0;
 				entry.NextLookupAttempt = DateTime.MinValue;
 
@@ -585,6 +626,10 @@ namespace StockWatcher
 					}
 				}
 
+				double currentDisplayedPrice = GetDisplayedPriceForTrend(entry);
+				UpdatePriceTrendIndicator(
+					entry, previousDisplayedPrice, currentDisplayedPrice);
+
 				if (persistChanged)
 					_settings.Save();
 
@@ -592,6 +637,10 @@ namespace StockWatcher
 			}
 			else
 			{
+				entry.QuoteFetchAttemptedThisSession = true;
+				if (entry.DataRetrievalFailureSince == DateTime.MinValue)
+					entry.DataRetrievalFailureSince = DateTime.Now;
+
 				entry.LookupFailCount++;
 				string errDetail = !string.IsNullOrEmpty(result.ErrorMessage)
 					? $" [{result.ErrorMessage}]" : "";
@@ -668,6 +717,9 @@ namespace StockWatcher
 					"Bestätigen", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
 			{
 				_settings.Watchlist.Remove(entry);
+				_priceTrendIndicators.Remove(entry);
+				_priceTrendDirections.Remove(entry);
+				_priceTrendCounts.Remove(entry);
 				_settings.Save();
 				RefreshListView();
 			}
@@ -918,6 +970,64 @@ namespace StockWatcher
 		// ListView aktualisieren
 		// -----------------------------------------------------------------------
 
+		private static double GetDisplayedPriceForTrend(WatchlistEntry entry)
+		{
+			if (entry == null)
+				return 0.0;
+
+			if (entry.ConvertToEur)
+				return entry.LastPriceEur > 0.0 ? entry.LastPriceEur : 0.0;
+
+			return entry.LastPrice > 0.0 ? entry.LastPrice : 0.0;
+		}
+
+		private void UpdatePriceTrendIndicator(
+			WatchlistEntry entry,
+			double previousValue,
+			double currentValue)
+		{
+			if (previousValue <= 0.0 || currentValue <= 0.0)
+			{
+				_priceTrendIndicators[entry] = "◀▶";
+				_priceTrendDirections[entry] = 0;
+				_priceTrendCounts[entry] = 0;
+				return;
+			}
+
+			double previousComparable = Math.Round(previousValue, 2, MidpointRounding.AwayFromZero);
+			double currentComparable = Math.Round(currentValue, 2, MidpointRounding.AwayFromZero);
+
+			int direction = currentComparable > previousComparable
+				? 1
+				: currentComparable < previousComparable ? -1 : 0;
+
+			if (direction == 0)
+			{
+				_priceTrendIndicators[entry] = "◀▶";
+				_priceTrendDirections[entry] = 0;
+				_priceTrendCounts[entry] = 0;
+				return;
+			}
+
+			int previousDirection = _priceTrendDirections.TryGetValue(entry, out int storedDirection)
+				? storedDirection
+				: 0;
+			int count = previousDirection == direction &&
+				_priceTrendCounts.TryGetValue(entry, out int storedCount)
+				? storedCount + 1
+				: 1;
+
+			_priceTrendDirections[entry] = direction;
+			_priceTrendCounts[entry] = count;
+
+			char triangle = direction > 0 ? '▲' : '▼';
+			string indicator = new string(triangle, Math.Min(count, 3));
+			if (count >= 4)
+				indicator += "+";
+
+			_priceTrendIndicators[entry] = indicator;
+		}
+
 		private static string FormatListLimit(WatchlistEntry entry, bool isUpper)
 		{
 			double value = isUpper ? entry.LimitUpper : entry.LimitLower;
@@ -931,13 +1041,22 @@ namespace StockWatcher
 				: $"{value:N2} {currency}";
 		}
 
-		private void RefreshListView()
+		private void RefreshListView(bool updatePortfolioTrend = false)
 		{
 			_listView.BeginUpdate();
 			_listView.Items.Clear();
 
 			foreach (WatchlistEntry entry in _settings.Watchlist)
 			{
+				bool dataRetrievalTimedOut = IsDataRetrievalTimedOut(entry);
+				string displayedStatusText = dataRetrievalTimedOut
+					? "NOK: Timeout for Data Retrieval"
+					: entry.StatusText;
+
+				string priceTrendText = _priceTrendIndicators.TryGetValue(entry, out string priceTrend)
+					? priceTrend
+					: "◀▶";
+
 				// Kurs-Spalte: einheitlich mit ISO-Währungscode, kein €-Symbol
 				string priceText;
 				if (entry.LastPrice <= 0.0)
@@ -955,6 +1074,23 @@ namespace StockWatcher
 						: $"{entry.LastPrice:N2} {entry.QuoteCurrency}";
 				}
 
+				string marketValueText = "–";
+				if (entry.Quantity > 0 && entry.LastPrice > 0)
+				{
+					if (entry.ConvertToEur && entry.LastPriceEur > 0)
+					{
+						marketValueText = $"{entry.Quantity * entry.LastPriceEur:N2} EUR";
+					}
+					else
+					{
+						double marketValue = entry.Quantity * entry.LastPrice;
+
+						marketValueText = string.IsNullOrWhiteSpace(entry.QuoteCurrency)
+							? $"{marketValue:N2}"
+							: $"{marketValue:N2} {entry.QuoteCurrency}";
+					}
+				}
+
 				string upperText = FormatListLimit(entry, true);
 				string lowerText = FormatListLimit(entry, false);
 
@@ -964,6 +1100,10 @@ namespace StockWatcher
 				string referenceText = entry.ReferencePrice > 0
 					? $"{entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
 					: "–";
+				string referenceValueText =
+					entry.Quantity > 0 && entry.ReferencePrice > 0
+						? $"{entry.Quantity * entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
+						: "–";
 
 				// P&L immer in EUR (Kauf-/Referenzkurs × historischer FX → EUR-Basis)
 				double effectiveFx = entry.EffectiveReferenceFxRate;
@@ -992,16 +1132,44 @@ namespace StockWatcher
 					.Replace("\n", " ");
 
 				var item = new ListViewItem(entry.Name) { UseItemStyleForSubItems = false };
-				item.SubItems.Add(entry.Isin);
-				item.SubItems.Add(priceText);
+
+				var siIsin = new ListViewItem.ListViewSubItem
+				{
+					Text = entry.Isin
+				};
+				item.SubItems.Add(siIsin);
 				item.SubItems.Add(qtyText);
 				item.SubItems.Add(referenceText);
+				item.SubItems.Add(referenceValueText);
+				item.SubItems.Add(priceTrendText);
+				item.SubItems.Add(priceText);
+				item.SubItems.Add(marketValueText);
 
-				var siDiffAmt = new ListViewItem.ListViewSubItem { Text = diffAmtText, ForeColor = diffColor };
-				var siDiffPct = new ListViewItem.ListViewSubItem { Text = diffPctText, ForeColor = diffColor };
+				var siDiffAmt = new ListViewItem.ListViewSubItem
+				{
+					Text = diffAmtText,
+					ForeColor = diffColor
+				};
+
+				var siDiffPct = new ListViewItem.ListViewSubItem
+				{
+					Text = diffPctText,
+					ForeColor = diffColor
+				};
+
 				item.SubItems.Add(siDiffAmt);
 				item.SubItems.Add(siDiffPct);
 
+				// Unteres Limit zuerst
+				var siLower = new ListViewItem.ListViewSubItem { Text = lowerText };
+				if (!entry.LimitLowerEnabled)
+				{
+					siLower.ForeColor = Color.Gray;
+					siLower.Font = _disabledLimitFont;
+				}
+				item.SubItems.Add(siLower);
+
+				// Oberes Limit danach
 				var siUpper = new ListViewItem.ListViewSubItem { Text = upperText };
 				if (!entry.LimitUpperEnabled)
 				{
@@ -1010,27 +1178,127 @@ namespace StockWatcher
 				}
 				item.SubItems.Add(siUpper);
 
-				var siLower = new ListViewItem.ListViewSubItem { Text = lowerText };
-				if (!entry.LimitLowerEnabled)
-				{
-					siLower.ForeColor = Color.Gray;
-					siLower.Font = _disabledLimitFont;
-				}
-				item.SubItems.Add(siLower);
-				item.SubItems.Add(entry.StatusText);
 				item.SubItems.Add(typeText);
 				item.SubItems.Add(noteText);
+				var siStatus = new ListViewItem.ListViewSubItem
+				{
+					Text = displayedStatusText
+				};
+				item.SubItems.Add(siStatus);
 
 				if (entry.UpperLimitReached)
 					item.BackColor = Color.FromArgb(200, 255, 200);
 				else if (entry.LowerLimitReached)
 					item.BackColor = Color.FromArgb(255, 200, 200);
 
+				if (dataRetrievalTimedOut)
+				{
+					Color warningColor = Color.LightYellow;
+					item.SubItems[0].BackColor = warningColor;
+					siIsin.BackColor = warningColor;
+					siStatus.BackColor = warningColor;
+				}
+
 				item.Tag = entry;
 				_listView.Items.Add(item);
 			}
 
+			UpdatePortfolioSummary(updatePortfolioTrend);
 			_listView.EndUpdate();
+		}
+
+		// -----------------------------------------------------------------------
+		private bool IsDataRetrievalTimedOut(WatchlistEntry entry)
+		{
+			if (_settings.DataRetrievalTimeoutMinutes <= 0 ||
+				!entry.QuoteFetchAttemptedThisSession)
+				return false;
+
+			DateTime referenceTime = entry.LastSuccessfulQuoteFetch != DateTime.MinValue
+				? entry.LastSuccessfulQuoteFetch
+				: entry.DataRetrievalFailureSince;
+
+			if (referenceTime == DateTime.MinValue)
+				return false;
+
+			return DateTime.Now - referenceTime >=
+				TimeSpan.FromMinutes(_settings.DataRetrievalTimeoutMinutes);
+		}
+
+		private void UpdatePortfolioSummary(bool updateTrend)
+		{
+			int positionCount = 0;
+			double totalMarketValueEur = 0.0;
+			double totalDiffEur = 0.0;
+			bool marketValueComplete = true;
+			bool diffComplete = true;
+
+			foreach (WatchlistEntry entry in _settings.Watchlist)
+			{
+				if (entry.EntryType != WatchlistEntryType.Holding || entry.Quantity <= 0)
+					continue;
+
+				positionCount++;
+
+				if (entry.LastPriceEur > 0)
+					totalMarketValueEur += entry.Quantity * entry.LastPriceEur;
+				else
+					marketValueComplete = false;
+
+				double effectiveFx = entry.EffectiveReferenceFxRate;
+				if (entry.ReferencePrice > 0 && entry.LastPriceEur > 0 && effectiveFx > 0)
+				{
+					double referenceEur = entry.Quantity * entry.ReferencePrice * effectiveFx;
+					double currentEur = entry.Quantity * entry.LastPriceEur;
+					totalDiffEur += currentEur - referenceEur;
+				}
+				else
+				{
+					diffComplete = false;
+				}
+			}
+
+			if (updateTrend && marketValueComplete)
+			{
+				double comparableValue = Math.Round(totalMarketValueEur, 2, MidpointRounding.AwayFromZero);
+				if (_previousPortfolioMarketValueEur.HasValue)
+				{
+					double previousValue = Math.Round(
+						_previousPortfolioMarketValueEur.Value, 2, MidpointRounding.AwayFromZero);
+					_portfolioTrendIndicator = comparableValue > previousValue
+						? "▲"
+						: comparableValue < previousValue ? "▼" : "◀▶";
+				}
+				else
+				{
+					_portfolioTrendIndicator = "◀▶";
+				}
+
+				_previousPortfolioMarketValueEur = comparableValue;
+			}
+			else if (updateTrend)
+			{
+				_portfolioTrendIndicator = "◀▶";
+			}
+
+			string marketValueText = marketValueComplete
+				? $"{totalMarketValueEur:N2} EUR"
+				: "– EUR";
+
+			string diffText;
+			if (!diffComplete)
+			{
+				diffText = "– EUR";
+			}
+			else
+			{
+				double displayDiff = NormalizeTwoDecimalDisplay(totalDiffEur);
+				string sign = displayDiff > 0 ? "+" : "";
+				diffText = $"{sign}{displayDiff:N2} EUR";
+			}
+
+			_lblPortfolioSummary.Text =
+				$"| {_portfolioTrendIndicator} | {positionCount} Pos. | {marketValueText} | {diffText}";
 		}
 
 		// -----------------------------------------------------------------------

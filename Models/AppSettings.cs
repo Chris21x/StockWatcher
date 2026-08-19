@@ -11,6 +11,7 @@ namespace StockWatcher.Models
 	{
 		// ---- Einstellungen ----
 		public int    IntervalMinutes  { get; set; } = 10;
+		public int    DataRetrievalTimeoutMinutes { get; set; } = 240;
 		public string ColumnOrder      { get; set; } = "";
 		public string ColumnWidths     { get; set; } = "";
 		public int    MainWindowLeft   { get; set; } = 0;
@@ -18,6 +19,7 @@ namespace StockWatcher.Models
 		public int    MainWindowWidth  { get; set; } = 0;
 		public int    MainWindowHeight { get; set; } = 0;
 		public bool   MainWindowMaximized { get; set; } = false;
+		public bool   StartMinimized      { get; set; } = false;
 		public List<WatchlistEntry> Watchlist { get; set; } = new List<WatchlistEntry>();
 
 		/// <summary>Pfad zur XML-Datendatei (frei wählbar, auch Cloud-Ordner).</summary>
@@ -73,6 +75,8 @@ namespace StockWatcher.Models
 				{
 					if (int.TryParse(general.Element("IntervalMinutes")?.Value, out int iv))
 						s.IntervalMinutes = Math.Max(1, Math.Min(60, iv));
+					if (int.TryParse(general.Element("DataRetrievalTimeoutMinutes")?.Value, out int timeoutMinutes))
+						s.DataRetrievalTimeoutMinutes = Math.Max(0, timeoutMinutes);
 					s.ColumnOrder      = general.Element("ColumnOrder")?.Value ?? "";
 					s.ColumnWidths     = general.Element("ColumnWidths")?.Value ?? "";
 					if (int.TryParse(general.Element("MainWindowLeft")?.Value, out int wl))
@@ -84,6 +88,7 @@ namespace StockWatcher.Models
 					if (int.TryParse(general.Element("MainWindowHeight")?.Value, out int wh))
 						s.MainWindowHeight = wh;
 					s.MainWindowMaximized = general.Element("MainWindowMaximized")?.Value == "true";
+					s.StartMinimized      = general.Element("StartMinimized")?.Value == "true";
 					// Benachrichtigungen: Default true → false nur wenn explizit "false"
 					s.NotifyBalloon     = general.Element("NotifyBalloon")?.Value     != "false";
 					s.NotifyAlarmDialog = general.Element("NotifyAlarmDialog")?.Value != "false";
@@ -124,6 +129,7 @@ namespace StockWatcher.Models
 							LastPriceEur         = ParseInv(el.Element("LastPriceEur")?.Value),
 							FxRate               = ParseInv(el.Element("FxRate")?.Value) is double fx && fx > 0 ? fx : 1.0,
 							LastUpdate           = ParseDate(el.Element("LastUpdate")?.Value),
+							LastSuccessfulQuoteFetch = ParseDate(el.Element("LastSuccessfulQuoteFetch")?.Value),
 							StatusText           = el.Element("StatusText")?.Value ?? "–"
 						};
 
@@ -165,6 +171,7 @@ namespace StockWatcher.Models
 					new XElement("StockWatcher",
 						new XElement("General",
 							new XElement("IntervalMinutes",  IntervalMinutes),
+							new XElement("DataRetrievalTimeoutMinutes", DataRetrievalTimeoutMinutes),
 							new XElement("ColumnOrder",      ColumnOrder ?? ""),
 							new XElement("ColumnWidths",     ColumnWidths ?? ""),
 							new XElement("MainWindowLeft",   MainWindowWidth > 0 ? MainWindowLeft.ToString() : ""),
@@ -172,6 +179,7 @@ namespace StockWatcher.Models
 							new XElement("MainWindowWidth",  MainWindowWidth > 0 ? MainWindowWidth.ToString() : ""),
 							new XElement("MainWindowHeight", MainWindowHeight > 0 ? MainWindowHeight.ToString() : ""),
 							new XElement("MainWindowMaximized", MainWindowMaximized ? "true" : "false"),
+							new XElement("StartMinimized",      StartMinimized ? "true" : "false"),
 							new XElement("NotifyBalloon",     NotifyBalloon     ? "true" : "false"),
 							new XElement("NotifyAlarmDialog", NotifyAlarmDialog ? "true" : "false"),
 							new XElement("NotifyTrayDot",     NotifyTrayDot     ? "true" : "false"),
@@ -233,6 +241,8 @@ namespace StockWatcher.Models
 					new XElement("FxRate",               Inv(e.FxRate)),
 					new XElement("LastUpdate",           e.LastUpdate == DateTime.MinValue
 					                                            ? "" : e.LastUpdate.ToString("o")),
+					new XElement("LastSuccessfulQuoteFetch", e.LastSuccessfulQuoteFetch == DateTime.MinValue
+					                                            ? "" : e.LastSuccessfulQuoteFetch.ToString("o")),
 					new XElement("StatusText",           e.StatusText ?? "–")
 				));
 			}
@@ -272,9 +282,65 @@ namespace StockWatcher.Models
 		{
 			try
 			{
-				File.WriteAllLines(BootstrapPath,
-					new[] { "[StockWatcher]", $"DataFile={xmlPath}" },
-					Encoding.UTF8);
+				if (!File.Exists(BootstrapPath))
+				{
+					File.WriteAllLines(BootstrapPath,
+						new[] { "[StockWatcher]", $"DataFile={xmlPath}" },
+						Encoding.UTF8);
+					return;
+				}
+
+				var lines = new List<string>(File.ReadAllLines(BootstrapPath, Encoding.UTF8));
+
+				int stockWatcherSection = -1;
+				int nextSection = lines.Count;
+				int dataFileLine = -1;
+
+				for (int i = 0; i < lines.Count; i++)
+				{
+					string trimmed = lines[i].Trim();
+
+					if (trimmed.Equals("[StockWatcher]", StringComparison.OrdinalIgnoreCase))
+					{
+						stockWatcherSection = i;
+						nextSection = lines.Count;
+
+						for (int j = i + 1; j < lines.Count; j++)
+						{
+							string sectionLine = lines[j].Trim();
+							if (sectionLine.StartsWith("[", StringComparison.Ordinal) &&
+								sectionLine.EndsWith("]", StringComparison.Ordinal))
+							{
+								nextSection = j;
+								break;
+							}
+
+							if (sectionLine.StartsWith("DataFile=", StringComparison.OrdinalIgnoreCase))
+								dataFileLine = j;
+						}
+
+						break;
+					}
+				}
+
+				if (stockWatcherSection < 0)
+				{
+					if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[lines.Count - 1]))
+						lines.Add("");
+
+					lines.Add("[StockWatcher]");
+					lines.Add($"DataFile={xmlPath}");
+				}
+				else if (dataFileLine >= 0)
+				{
+					lines[dataFileLine] = $"DataFile={xmlPath}";
+				}
+				else
+				{
+					lines.Insert(nextSection, $"DataFile={xmlPath}");
+				}
+
+				File.WriteAllLines(BootstrapPath, lines, Encoding.UTF8);
 			}
 			catch { }
 		}

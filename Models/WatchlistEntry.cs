@@ -42,14 +42,17 @@ namespace StockWatcher.Models
 		public double LastPrice { get; set; } = 0.0;         // Kurs in QuoteCurrency
 		public double LastPriceEur { get; set; } = 0.0;      // Kurs in EUR
 		public double FxRate { get; set; } = 1.0;            // verwendeter Wechselkurs QuoteCurrency→EUR
-		public DateTime LastUpdate { get; set; } = DateTime.MinValue;
+		public DateTime LastUpdate { get; set; } = DateTime.MinValue; // Zeitstempel des gelieferten Börsenkurses
+		public DateTime LastSuccessfulQuoteFetch { get; set; } = DateTime.MinValue; // letzter erfolgreicher Abruf durch StockWatcher
 		public string StatusText { get; set; } = "–";
 		public bool AlarmUpperFired { get; set; } = false;
 		public bool AlarmLowerFired { get; set; } = false;
 		public bool UpperLimitReached { get; set; } = false;
 		public bool LowerLimitReached { get; set; } = false;
 
-		// ---- Lookup-Throttling (nicht persistiert) ----
+		// ---- Abrufstatus / Lookup-Throttling (nicht persistiert) ----
+		public bool QuoteFetchAttemptedThisSession { get; set; } = false;
+		public DateTime DataRetrievalFailureSince { get; set; } = DateTime.MinValue;
 		public int LookupFailCount { get; set; } = 0;
 		public DateTime NextLookupAttempt { get; set; } = DateTime.MinValue;
 

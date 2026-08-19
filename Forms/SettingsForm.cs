@@ -12,6 +12,8 @@ namespace StockWatcher.Forms
 	{
 		// Allgemein
 		private NumericUpDown _nudInterval;
+		private NumericUpDown _nudDataTimeout;
+		private CheckBox      _chkStartMinimized;
 		private TextBox       _txtDataFile;
 
 		// Benachrichtigungen
@@ -66,6 +68,28 @@ namespace StockWatcher.Forms
 				Anchor   = AnchorStyles.Top | AnchorStyles.Left
 			};
 			Controls.Add(_nudInterval);
+
+			// ---- Daten-Timeout ----
+			Controls.Add(MakeLbl("Daten-Timeout (Min.):", 290, 16, 145, font));
+			_nudDataTimeout = new NumericUpDown
+			{
+				Location = new Point(435, 12),
+				Size     = new Size(70, 24),
+				Minimum  = 0, Maximum = 10080, Value = 240,
+				Font     = font,
+				Anchor   = AnchorStyles.Top | AnchorStyles.Left
+			};
+			Controls.Add(_nudDataTimeout);
+
+			_chkStartMinimized = new CheckBox
+			{
+				Text     = "Starte minimiert",
+				Location = new Point(525, 14),
+				AutoSize = true,
+				Font     = font,
+				Anchor   = AnchorStyles.Top | AnchorStyles.Left
+			};
+			Controls.Add(_chkStartMinimized);
 
 			// ---- Datendatei ----
 			Controls.Add(MakeLbl("Datendatei (XML):", 12, 54, 135, font));
@@ -228,6 +252,8 @@ namespace StockWatcher.Forms
 		private void LoadFromSettings()
 		{
 			_nudInterval.Value = Math.Max(1, Math.Min(60, Settings.IntervalMinutes));
+			_nudDataTimeout.Value = Math.Max(0, Math.Min(10080, Settings.DataRetrievalTimeoutMinutes));
+			_chkStartMinimized.Checked = Settings.StartMinimized;
 			_txtDataFile.Text  = Settings.DataFilePath ?? "";
 
 			_chkBalloon.Checked     = Settings.NotifyBalloon;
@@ -330,7 +356,9 @@ namespace StockWatcher.Forms
 		{
 			_grid.EndEdit();
 
-			Settings.IntervalMinutes  = (int)_nudInterval.Value;
+			Settings.IntervalMinutes = (int)_nudInterval.Value;
+			Settings.DataRetrievalTimeoutMinutes = (int)_nudDataTimeout.Value;
+			Settings.StartMinimized = _chkStartMinimized.Checked;
 			Settings.NotifyBalloon    = _chkBalloon.Checked;
 			Settings.NotifyAlarmDialog = _chkAlarmDialog.Checked;
 			Settings.NotifyTrayDot    = _chkTrayDot.Checked;
