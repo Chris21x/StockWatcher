@@ -30,17 +30,26 @@ namespace StockWatcher.Forms
 		private ComboBox      _cmbReferenceCurrency;
 		private TextBox       _txtReferenceDate;
 		private Label         _lblFxRate;
+		private TextBox       _txtIncomeEur;
+		private TextBox       _txtSalePrice;
+		private ComboBox      _cmbSaleCurrency;
+		private TextBox       _txtSaleDate;
+		private Label         _lblSaleFxRate;
 		private Label         _lblStatus;
 		private Button        _btnCheck;
 		private Button        _btnFetch;
 		private Button        _btnOk;
 		private Button        _btnCancel;
+		private GroupBox      _grpMonitoring;
+		private GroupBox      _grpSale;
 
 		private string _resolvedYahooSymbol = "";
 		private string _resolvedIsin = "";
 		private double _fetchedReferenceFxRate = 0.0;
+		private double _fetchedSaleFxRate = 0.0;
 		private bool   _lookupRunning = false;
 		private bool   _fxLookupRunning = false;
+		private bool   _saleFxLookupRunning = false;
 		private bool   _isinDirty = false;
 
 		public WatchlistEntry Result { get; private set; }
@@ -49,7 +58,7 @@ namespace StockWatcher.Forms
 		{
 			_client = client;
 			Text = existing == null ? "Wertpapier hinzufügen" : "Eintrag bearbeiten";
-			Size = new Size(610, 690);
+			ClientSize = new Size(740, 650);
 			StartPosition = FormStartPosition.CenterParent;
 			FormBorderStyle = FormBorderStyle.FixedDialog;
 			MaximizeBox = false;
@@ -61,7 +70,9 @@ namespace StockWatcher.Forms
 			{
 				_txtIsin.Text                = existing.Isin;
 				_txtName.Text                = existing.Name;
-				_cmbEntryType.SelectedIndex  = existing.EntryType == WatchlistEntryType.BuyCandidate ? 1 : 0;
+				_cmbEntryType.SelectedIndex  = existing.EntryType == WatchlistEntryType.Realized
+					? 2
+					: existing.EntryType == WatchlistEntryType.BuyCandidate ? 1 : 0;
 				_txtNote.Text                = existing.Note ?? "";
 				_resolvedYahooSymbol         = existing.YahooSymbol ?? "";
 				_resolvedIsin                = existing.Isin ?? "";
@@ -88,188 +99,345 @@ namespace StockWatcher.Forms
 				UpdateFxLabel(existing.EffectiveReferenceCurrency, existing.ReferenceFxRate,
 					existing.ReferenceDate != DateTime.MinValue ? existing.ReferenceDate : (DateTime?)null);
 
+				if (existing.IncomeEur > 0)
+					_txtIncomeEur.Text = existing.IncomeEur.ToString("N2", CultureInfo.InvariantCulture);
+				if (existing.SalePrice > 0)
+					_txtSalePrice.Text = existing.SalePrice.ToString("N4", CultureInfo.InvariantCulture);
+
+				_cmbSaleCurrency.Text = existing.SaleCurrency ?? "";
+				if (existing.SaleDate != DateTime.MinValue)
+					_txtSaleDate.Text = existing.SaleDate.ToString("dd.MM.yyyy");
+
+				_fetchedSaleFxRate = existing.SaleFxRate;
+				UpdateSaleFxLabel(existing.EffectiveSaleCurrency, existing.SaleFxRate,
+					existing.SaleDate != DateTime.MinValue ? existing.SaleDate : (DateTime?)null);
+
 				_isinDirty = false;
 			}
 
 			RefreshLimitUnitDisplay();
+			RefreshEntryTypeUi();
 		}
 
 		private void BuildUi()
 		{
-			const int LabelW    = 145;
-			const int FieldLeft = 158;
-			const int FieldW    = 220;
-			int       y         = 18;
-			const int RowH      = 36;
-			var font   = new Font("Segoe UI", 9f);
+			var font = new Font("Segoe UI", 9f);
 			var fontSm = new Font("Segoe UI", 8f);
 
-			// ---- ISIN ----
-			Controls.Add(MakeLbl("ISIN:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_txtIsin = new TextBox { Location = new Point(FieldLeft, y), Width = FieldW,
-				Font = font, CharacterCasing = CharacterCasing.Upper, MaxLength = 12 };
-			_txtIsin.Leave       += TxtIsin_Leave;
-			_txtIsin.TextChanged += (s, e) => _isinDirty = true;
-			Controls.Add(_txtIsin);
-			_btnCheck = new Button { Text = "Prüfen",
-				Location = new Point(FieldLeft + FieldW + 8, y - 1), Size = new Size(80, 26), Font = font };
-			_btnCheck.Click += async (s, e) => await RunLookupAsync();
-			Controls.Add(_btnCheck);
-			y += RowH;
+			// -------------------------------------------------------------------
+			// Wertpapier / Identität
+			// -------------------------------------------------------------------
+			var grpIdentity = new GroupBox
+			{
+				Text = "Wertpapier",
+				Location = new Point(12, 10),
+				Size = new Size(716, 142),
+				Font = font
+			};
+			Controls.Add(grpIdentity);
 
-			// ---- Name ----
-			Controls.Add(MakeLbl("Name:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_txtName = new TextBox { Location = new Point(FieldLeft, y), Width = FieldW + 88, Font = font };
-			Controls.Add(_txtName);
-			y += RowH;
-
-			// ---- Typ ----
-			Controls.Add(MakeLbl("Typ:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
+			grpIdentity.Controls.Add(MakeLbl("Typ:", 16, 29, 70, font));
 			_cmbEntryType = new ComboBox
 			{
-				Location      = new Point(FieldLeft, y),
-				Width         = 160,
-				Font          = font,
+				Location = new Point(92, 25),
+				Width = 155,
+				Font = font,
 				DropDownStyle = ComboBoxStyle.DropDownList
 			};
-			_cmbEntryType.Items.AddRange(new object[] { "Bestand", "Kaufkandidat" });
+			_cmbEntryType.Items.AddRange(new object[] { "Bestand", "Kaufinteresse", "Realisiert" });
 			_cmbEntryType.SelectedIndex = 0;
-			Controls.Add(_cmbEntryType);
-			y += RowH;
+			_cmbEntryType.SelectedIndexChanged += (s, e) => RefreshEntryTypeUi();
+			grpIdentity.Controls.Add(_cmbEntryType);
 
-			// ---- Kurs-/Listingwährung ----
-			Controls.Add(MakeLbl("Kurs-/Listingwährung:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_cmbQuoteCurrency = MakeCurrencyCombo(FieldLeft, y, font);
+			grpIdentity.Controls.Add(MakeLbl("ISIN:", 270, 29, 45, font));
+			_txtIsin = new TextBox
+			{
+				Location = new Point(318, 25),
+				Width = 190,
+				Font = font,
+				CharacterCasing = CharacterCasing.Upper,
+				MaxLength = 12
+			};
+			_txtIsin.Leave += TxtIsin_Leave;
+			_txtIsin.TextChanged += (s, e) => _isinDirty = true;
+			grpIdentity.Controls.Add(_txtIsin);
+
+			_btnCheck = new Button
+			{
+				Text = "Prüfen",
+				Location = new Point(516, 23),
+				Size = new Size(84, 28),
+				Font = font
+			};
+			_btnCheck.Click += async (s, e) => await RunLookupAsync();
+			grpIdentity.Controls.Add(_btnCheck);
+
+			_btnFetch = new Button
+			{
+				Text = "Abrufen (F5)",
+				Location = new Point(606, 23),
+				Size = new Size(96, 28),
+				Font = font
+			};
+			_btnFetch.Click += async (s, e) => await RunFetchAsync();
+			grpIdentity.Controls.Add(_btnFetch);
+
+			grpIdentity.Controls.Add(MakeLbl("Name:", 16, 65, 70, font));
+			_txtName = new TextBox
+			{
+				Location = new Point(92, 61),
+				Width = 610,
+				Font = font
+			};
+			grpIdentity.Controls.Add(_txtName);
+
+			grpIdentity.Controls.Add(MakeLbl("Kurswährung:", 16, 101, 95, font));
+			_cmbQuoteCurrency = MakeCurrencyCombo(112, 97, font);
 			_cmbQuoteCurrency.TextChanged += (s, e) => RefreshLimitUnitDisplay();
-			Controls.Add(_cmbQuoteCurrency);
-			Controls.Add(MakeLbl("(wird bei Kursabruf automatisch aktualisiert)", FieldLeft + 86, y + 4, 290, fontSm, Color.Gray));
-			y += RowH;
+			grpIdentity.Controls.Add(_cmbQuoteCurrency);
 
-			// ---- Unteres Limit ----
-			Controls.Add(MakeLbl("Unteres Limit:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_nudLower = MakeNud(FieldLeft, y, font);
-			Controls.Add(_nudLower);
-			_cmbLowerUnit = MakeLimitUnitCombo(FieldLeft + 128, y, font);
-			Controls.Add(_cmbLowerUnit);
-			_chkLowerEnabled = new CheckBox
-			{
-				Text = "Alarm aktiv",
-				Location = new Point(FieldLeft + 220, y + 2),
-				Width = 105,
-				Font = font,
-				Checked = false
-			};
-			Controls.Add(_chkLowerEnabled);
-			y += RowH;
-
-			// ---- Oberes Limit ----
-			Controls.Add(MakeLbl("Oberes Limit:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_nudUpper = MakeNud(FieldLeft, y, font);
-			Controls.Add(_nudUpper);
-			_cmbUpperUnit = MakeLimitUnitCombo(FieldLeft + 128, y, font);
-			Controls.Add(_cmbUpperUnit);
-			_chkUpperEnabled = new CheckBox
-			{
-				Text = "Alarm aktiv",
-				Location = new Point(FieldLeft + 220, y + 2),
-				Width = 105,
-				Font = font,
-				Checked = false
-			};
-			Controls.Add(_chkUpperEnabled);
-			y += RowH;
-
-			// ---- In EUR umrechnen ----
 			_chkConvertToEur = new CheckBox
 			{
-				Text     = "Kurs in EUR umrechnen  (absolute Limits ebenfalls in EUR)",
-				Location = new Point(FieldLeft - LabelW - 4, y + 2),
-				Width    = FieldW + LabelW + 140,
-				Font     = font
+				Text = "Kurs in EUR umrechnen  (absolute Limits ebenfalls in EUR)",
+				Location = new Point(214, 99),
+				Width = 420,
+				Font = font,
+				AutoSize = false
 			};
 			_chkConvertToEur.CheckedChanged += (s, e) => RefreshLimitUnitDisplay();
-			Controls.Add(_chkConvertToEur);
-			y += RowH;
+			grpIdentity.Controls.Add(_chkConvertToEur);
 
-			// ---- Stückzahl ----
-			Controls.Add(MakeLbl("Stückzahl:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_txtQuantity = new TextBox { Location = new Point(FieldLeft, y), Width = 120, Font = font };
+
+			// -------------------------------------------------------------------
+			// Position / Referenz
+			// -------------------------------------------------------------------
+			var grpPosition = new GroupBox
+			{
+				Text = "Position / Referenz",
+				Location = new Point(12, 160),
+				Size = new Size(716, 150),
+				Font = font
+			};
+			Controls.Add(grpPosition);
+
+			grpPosition.Controls.Add(MakeLbl("Stückzahl:", 16, 31, 115, font));
+			_txtQuantity = new TextBox
+			{
+				Location = new Point(135, 27),
+				Width = 105,
+				Font = font
+			};
 			_txtQuantity.Leave += TxtNumeric_Leave;
-			Controls.Add(_txtQuantity);
-			Controls.Add(MakeLbl("(leer = keine Angabe)", FieldLeft + 128, y + 4, 160, fontSm, Color.Gray));
-			y += RowH;
+			grpPosition.Controls.Add(_txtQuantity);
+			grpPosition.Controls.Add(MakeLbl("(leer = keine Angabe)", 248, 31, 135, fontSm, Color.Gray));
 
-			// ---- Kauf-/Referenzkurs + Währung ----
-			Controls.Add(MakeLbl("Kauf-/Referenzkurs:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_txtReferencePrice = new TextBox { Location = new Point(FieldLeft, y), Width = 100, Font = font };
+			grpPosition.Controls.Add(MakeLbl("Erträge/Dividenden:", 405, 31, 135, font));
+			_txtIncomeEur = new TextBox
+			{
+				Location = new Point(544, 27),
+				Width = 100,
+				Font = font
+			};
+			_txtIncomeEur.Leave += TxtNumeric_Leave;
+			grpPosition.Controls.Add(_txtIncomeEur);
+			grpPosition.Controls.Add(MakeLbl("EUR", 651, 31, 40, font));
+
+			grpPosition.Controls.Add(MakeLbl("Kauf-/Referenzkurs:", 16, 69, 115, font));
+			_txtReferencePrice = new TextBox
+			{
+				Location = new Point(135, 65),
+				Width = 105,
+				Font = font
+			};
 			_txtReferencePrice.Leave += TxtNumeric_Leave;
 			_txtReferencePrice.TextChanged += (s, e) => RefreshLimitUnitDisplay();
-			Controls.Add(_txtReferencePrice);
+			grpPosition.Controls.Add(_txtReferencePrice);
 
-			Controls.Add(MakeLbl("Währung:", FieldLeft + 108, y + 3, 60, font));
-			_cmbReferenceCurrency = MakeCurrencyCombo(FieldLeft + 168, y, font);
+			grpPosition.Controls.Add(MakeLbl("Währung:", 248, 69, 65, font));
+			_cmbReferenceCurrency = MakeCurrencyCombo(316, 65, font);
 			_cmbReferenceCurrency.Leave += CmbOrDate_Leave;
 			_cmbReferenceCurrency.SelectedIndexChanged += async (s, e) => await TriggerFxLookupAsync();
-			Controls.Add(_cmbReferenceCurrency);
-			y += RowH;
+			grpPosition.Controls.Add(_cmbReferenceCurrency);
 
-			// ---- Kauf-/Referenzdatum + FX-Rate ----
-			Controls.Add(MakeLbl("Kauf-/Referenzdatum:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
-			_txtReferenceDate = new TextBox { Location = new Point(FieldLeft, y), Width = 100, Font = font };
+			grpPosition.Controls.Add(MakeLbl("Kauf-/Referenzdatum:", 405, 69, 135, font));
+			_txtReferenceDate = new TextBox
+			{
+				Location = new Point(544, 65),
+				Width = 100,
+				Font = font
+			};
 			_txtReferenceDate.Leave += CmbOrDate_Leave;
-			Controls.Add(_txtReferenceDate);
-			Controls.Add(MakeLbl("(dd.MM.yyyy, optional)", FieldLeft + 108, y + 4, 130, fontSm, Color.Gray));
+			grpPosition.Controls.Add(_txtReferenceDate);
+			grpPosition.Controls.Add(MakeLbl("dd.MM.yyyy", 651, 69, 60, fontSm, Color.Gray));
 
 			_lblFxRate = new Label
 			{
-				Location  = new Point(FieldLeft + 242, y + 3),
-				Width     = 170,
-				Font      = fontSm,
+				Location = new Point(135, 105),
+				Width = 260,
+				Font = fontSm,
 				ForeColor = Color.Gray,
-				Text      = ""
+				Text = ""
 			};
-			Controls.Add(_lblFxRate);
-			y += RowH;
+			grpPosition.Controls.Add(_lblFxRate);
+			grpPosition.Controls.Add(MakeLbl(
+				"Erträge/Dividenden werden als eingetragener EUR-Betrag verwendet.",
+				405, 105, 285, fontSm, Color.Gray));
 
-			// ---- Bemerkung ----
-			Controls.Add(MakeLbl("Bemerkung:", FieldLeft - LabelW - 4, y + 3, LabelW, font));
+			// -------------------------------------------------------------------
+			// Kursüberwachung (Bestand / Kaufinteresse)
+			// -------------------------------------------------------------------
+			_grpMonitoring = new GroupBox
+			{
+				Text = "Kursüberwachung",
+				Location = new Point(12, 318),
+				Size = new Size(716, 128),
+				Font = font
+			};
+			Controls.Add(_grpMonitoring);
+
+			_grpMonitoring.Controls.Add(MakeLbl("Unteres Limit:", 16, 31, 115, font));
+			_nudLower = MakeNud(135, 27, font);
+			_grpMonitoring.Controls.Add(_nudLower);
+			_cmbLowerUnit = MakeLimitUnitCombo(263, 27, font);
+			_grpMonitoring.Controls.Add(_cmbLowerUnit);
+			_chkLowerEnabled = new CheckBox
+			{
+				Text = "Alarm aktiv",
+				Location = new Point(360, 29),
+				Width = 110,
+				Font = font
+			};
+			_grpMonitoring.Controls.Add(_chkLowerEnabled);
+
+			_grpMonitoring.Controls.Add(MakeLbl("Oberes Limit:", 16, 69, 115, font));
+			_nudUpper = MakeNud(135, 65, font);
+			_grpMonitoring.Controls.Add(_nudUpper);
+			_cmbUpperUnit = MakeLimitUnitCombo(263, 65, font);
+			_grpMonitoring.Controls.Add(_cmbUpperUnit);
+			_chkUpperEnabled = new CheckBox
+			{
+				Text = "Alarm aktiv",
+				Location = new Point(360, 67),
+				Width = 110,
+				Font = font
+			};
+			_grpMonitoring.Controls.Add(_chkUpperEnabled);
+
+			_grpMonitoring.Controls.Add(MakeLbl(
+				"Prozent-Limits beziehen sich auf den Kauf-/Referenzkurs.",
+				488, 49, 210, fontSm, Color.Gray));
+
+			// -------------------------------------------------------------------
+			// Verkauf (nur Realisiert) – belegt bewusst denselben Platz wie
+			// Kursüberwachung, damit der Dialog je Typ ruhig und kompakt bleibt.
+			// -------------------------------------------------------------------
+			_grpSale = new GroupBox
+			{
+				Text = "Verkauf",
+				Location = new Point(12, 318),
+				Size = new Size(716, 128),
+				Font = font,
+				Visible = false
+			};
+			Controls.Add(_grpSale);
+
+			_grpSale.Controls.Add(MakeLbl("Verkaufskurs:", 16, 31, 115, font));
+			_txtSalePrice = new TextBox
+			{
+				Location = new Point(135, 27),
+				Width = 105,
+				Font = font
+			};
+			_txtSalePrice.Leave += TxtNumeric_Leave;
+			_grpSale.Controls.Add(_txtSalePrice);
+
+			_grpSale.Controls.Add(MakeLbl("Währung:", 248, 31, 65, font));
+			_cmbSaleCurrency = MakeCurrencyCombo(316, 27, font);
+			_cmbSaleCurrency.Leave += SaleCmbOrDate_Leave;
+			_cmbSaleCurrency.SelectedIndexChanged += async (s, e) => await TriggerSaleFxLookupAsync();
+			_grpSale.Controls.Add(_cmbSaleCurrency);
+
+			_grpSale.Controls.Add(MakeLbl("Verkaufsdatum:", 405, 31, 135, font));
+			_txtSaleDate = new TextBox
+			{
+				Location = new Point(544, 27),
+				Width = 100,
+				Font = font
+			};
+			_txtSaleDate.Leave += SaleCmbOrDate_Leave;
+			_grpSale.Controls.Add(_txtSaleDate);
+			_grpSale.Controls.Add(MakeLbl("dd.MM.yyyy", 651, 31, 60, fontSm, Color.Gray));
+
+			_lblSaleFxRate = new Label
+			{
+				Location = new Point(135, 67),
+				Width = 260,
+				Font = fontSm,
+				ForeColor = Color.Gray,
+				Text = ""
+			};
+			_grpSale.Controls.Add(_lblSaleFxRate);
+			_grpSale.Controls.Add(MakeLbl(
+				"Der aktuelle Kurs wird auch für realisierte Positionen weiter abgerufen.",
+				405, 67, 285, fontSm, Color.Gray));
+
+			// -------------------------------------------------------------------
+			// Bemerkung
+			// -------------------------------------------------------------------
+			var grpNote = new GroupBox
+			{
+				Text = "Bemerkung",
+				Location = new Point(12, 454),
+				Size = new Size(716, 112),
+				Font = font
+			};
+			Controls.Add(grpNote);
+
 			_txtNote = new TextBox
 			{
-				Location      = new Point(FieldLeft, y),
-				Size          = new Size(FieldW + 160, 88),
-				Font          = font,
-				Multiline     = true,
+				Location = new Point(12, 24),
+				Size = new Size(692, 76),
+				Font = font,
+				Multiline = true,
 				AcceptsReturn = true,
-				ScrollBars    = ScrollBars.Vertical
+				ScrollBars = ScrollBars.Vertical
 			};
-			Controls.Add(_txtNote);
-			y += 96;
+			grpNote.Controls.Add(_txtNote);
 
-			// ---- Status ----
+			// -------------------------------------------------------------------
+			// Status + Buttons
+			// -------------------------------------------------------------------
 			_lblStatus = new Label
 			{
-				Location  = new Point(9, y),
-				Size      = new Size(576, 20),
-				Font      = fontSm,
+				Location = new Point(14, 575),
+				Size = new Size(714, 22),
+				Font = fontSm,
 				ForeColor = Color.Gray,
-				Text      = "ISIN eingeben, dann Tab oder 'Prüfen' klicken  (Identität: OpenFIGI, Kurs: Yahoo/Stooq)"
+				Text = "ISIN eingeben und prüfen; Kurs kann mit F5 aktualisiert werden."
 			};
 			Controls.Add(_lblStatus);
-			y += 30;
 
-			// ---- Buttons ----
-			_btnFetch = new Button { Text = "Abrufen (F5)", Location = new Point(9, y),
-				Size = new Size(120, 30), Font = font };
-			_btnFetch.Click += async (s, e) => await RunFetchAsync();
-			Controls.Add(_btnFetch);
-
-			_btnOk = new Button { Text = "OK", Location = new Point(400, y),
-				Size = new Size(80, 30), Font = font, DialogResult = DialogResult.OK };
+			_btnOk = new Button
+			{
+				Text = "OK",
+				Location = new Point(532, 606),
+				Size = new Size(90, 32),
+				Font = font,
+				DialogResult = DialogResult.OK
+			};
 			_btnOk.Click += BtnOk_Click;
-			_btnCancel = new Button { Text = "Abbrechen", Location = new Point(488, y),
-				Size = new Size(96, 30), Font = font, DialogResult = DialogResult.Cancel };
 			Controls.Add(_btnOk);
+
+			_btnCancel = new Button
+			{
+				Text = "Abbrechen",
+				Location = new Point(630, 606),
+				Size = new Size(98, 32),
+				Font = font,
+				DialogResult = DialogResult.Cancel
+			};
 			Controls.Add(_btnCancel);
+
 			AcceptButton = _btnOk;
 			CancelButton = _btnCancel;
 		}
@@ -316,7 +484,7 @@ namespace StockWatcher.Forms
 				SetStatus("✗  Ungültige ISIN", Color.Red);
 				return;
 			}
-			if (_lookupRunning || _fxLookupRunning) return;
+			if (_lookupRunning || _fxLookupRunning || _saleFxLookupRunning) return;
 
 			_lookupRunning = true;
 			SetLookupButtons(false);
@@ -516,6 +684,94 @@ namespace StockWatcher.Forms
 			}
 		}
 
+		private async void SaleCmbOrDate_Leave(object sender, EventArgs e) =>
+			await TriggerSaleFxLookupAsync();
+
+		private async Task TriggerSaleFxLookupAsync()
+		{
+			if (_cmbSaleCurrency == null || _txtSaleDate == null) return;
+
+			string ccy = _cmbSaleCurrency.Text.Trim().ToUpperInvariant();
+			if (string.IsNullOrEmpty(ccy) || ccy == "EUR")
+			{
+				_fetchedSaleFxRate = 1.0;
+				UpdateSaleFxLabel(ccy, 1.0, null);
+				return;
+			}
+
+			if (!TryParseDate(_txtSaleDate.Text, out DateTime date))
+			{
+				_fetchedSaleFxRate = 0.0;
+				_lblSaleFxRate.Text = "";
+				return;
+			}
+
+			if (_saleFxLookupRunning) return;
+			_saleFxLookupRunning     = true;
+			_lblSaleFxRate.Text      = "FX wird ermittelt…";
+			_lblSaleFxRate.ForeColor = Color.Gray;
+
+			double rate = await _client.GetHistoricalFxRateAsync(ccy, date);
+
+			_saleFxLookupRunning = false;
+			_fetchedSaleFxRate = rate;
+			UpdateSaleFxLabel(ccy, rate, date);
+		}
+
+		private void UpdateSaleFxLabel(string ccy, double rate, DateTime? date)
+		{
+			if (_lblSaleFxRate == null) return;
+
+			if (string.IsNullOrEmpty(ccy) || ccy == "EUR" || rate == 1.0)
+			{
+				_lblSaleFxRate.Text = "";
+				return;
+			}
+			if (rate <= 0)
+			{
+				_lblSaleFxRate.Text      = "FX nicht verfügbar";
+				_lblSaleFxRate.ForeColor = Color.OrangeRed;
+			}
+			else
+			{
+				string dateHint = date.HasValue ? $" ({date.Value:dd.MM.yy})" : "";
+				_lblSaleFxRate.Text      = $"FX{dateHint}: {rate:N4}";
+				_lblSaleFxRate.ForeColor = Color.DarkGreen;
+			}
+		}
+
+		private void RefreshEntryTypeUi()
+		{
+			if (_cmbEntryType == null) return;
+
+			bool realized = _cmbEntryType.SelectedIndex == 2;
+
+			if (_grpMonitoring != null) _grpMonitoring.Visible = !realized;
+			if (_grpSale != null) _grpSale.Visible = realized;
+
+			if (_txtSalePrice != null) _txtSalePrice.Enabled = realized;
+			if (_cmbSaleCurrency != null) _cmbSaleCurrency.Enabled = realized;
+			if (_txtSaleDate != null) _txtSaleDate.Enabled = realized;
+
+			if (_nudUpper != null) _nudUpper.Enabled = !realized;
+			if (_cmbUpperUnit != null) _cmbUpperUnit.Enabled = !realized;
+			if (_chkUpperEnabled != null) _chkUpperEnabled.Enabled = !realized;
+			if (_nudLower != null) _nudLower.Enabled = !realized;
+			if (_cmbLowerUnit != null) _cmbLowerUnit.Enabled = !realized;
+			if (_chkLowerEnabled != null) _chkLowerEnabled.Enabled = !realized;
+
+			if (_chkConvertToEur != null)
+			{
+				_chkConvertToEur.Enabled = true;
+				_chkConvertToEur.Text = realized
+					? "Aktuellen Kurs in EUR umrechnen"
+					: "Kurs in EUR umrechnen  (absolute Limits ebenfalls in EUR)";
+			}
+
+			if (_btnFetch != null)
+				_btnFetch.Enabled = !_lookupRunning;
+		}
+
 		// -----------------------------------------------------------------------
 		// Limit-Einheiten
 		// -----------------------------------------------------------------------
@@ -536,8 +792,9 @@ namespace StockWatcher.Forms
 			ReplaceLimitUnitItems(_cmbLowerUnit, absoluteUnit, lowerIndex);
 
 			bool hasReferencePrice = TryGetPositiveReferencePrice(out _);
-			_cmbUpperUnit.Enabled = hasReferencePrice || _cmbUpperUnit.SelectedIndex == 1;
-			_cmbLowerUnit.Enabled = hasReferencePrice || _cmbLowerUnit.SelectedIndex == 1;
+			bool realized = _cmbEntryType != null && _cmbEntryType.SelectedIndex == 2;
+			_cmbUpperUnit.Enabled = !realized && (hasReferencePrice || _cmbUpperUnit.SelectedIndex == 1);
+			_cmbLowerUnit.Enabled = !realized && (hasReferencePrice || _cmbLowerUnit.SelectedIndex == 1);
 		}
 
 		private static void ReplaceLimitUnitItems(ComboBox combo, string absoluteUnit, int selectedIndex)
@@ -580,7 +837,7 @@ namespace StockWatcher.Forms
 
 		private void BtnOk_Click(object sender, EventArgs e)
 		{
-			if (_lookupRunning || _fxLookupRunning)
+			if (_lookupRunning || _fxLookupRunning || _saleFxLookupRunning)
 			{
 				MessageBox.Show("Bitte den laufenden Abruf abwarten.", "Abruf läuft",
 					MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -599,10 +856,26 @@ namespace StockWatcher.Forms
 
 			double qty = ParseOptional(_txtQuantity.Text);
 			double referencePrice = ParseOptional(_txtReferencePrice.Text);
-			if (qty < 0 || referencePrice < 0)
+			double incomeEur = ParseOptional(_txtIncomeEur.Text);
+			double salePrice = ParseOptional(_txtSalePrice.Text);
+			if (qty < 0 || referencePrice < 0 || incomeEur < 0 || salePrice < 0)
 			{
-				MessageBox.Show("Stückzahl und Kauf-/Referenzkurs müssen positive Zahlen sein.",
+				MessageBox.Show("Stückzahl, Kauf-/Referenzkurs, Erträge und Verkaufskurs müssen positive Zahlen sein.",
 					"Eingabefehler", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+				DialogResult = DialogResult.None;
+				return;
+			}
+
+			WatchlistEntryType entryType = _cmbEntryType.SelectedIndex == 2
+				? WatchlistEntryType.Realized
+				: _cmbEntryType.SelectedIndex == 1
+					? WatchlistEntryType.BuyCandidate
+					: WatchlistEntryType.Holding;
+
+			if (entryType == WatchlistEntryType.Realized && (qty <= 0 || referencePrice <= 0 || salePrice <= 0))
+			{
+				MessageBox.Show("Für einen realisierten Eintrag werden Stückzahl, Kauf-/Referenzkurs und Verkaufskurs benötigt.",
+					"Verkaufsdaten fehlen", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 				DialogResult = DialogResult.None;
 				return;
 			}
@@ -612,8 +885,9 @@ namespace StockWatcher.Forms
 			LimitValueType lowerType = _cmbLowerUnit.SelectedIndex == 1
 				? LimitValueType.Percent : LimitValueType.Absolute;
 
-			if (((_chkUpperEnabled.Checked && upperType == LimitValueType.Percent) ||
-			     (_chkLowerEnabled.Checked && lowerType == LimitValueType.Percent)) && referencePrice <= 0)
+			if (entryType != WatchlistEntryType.Realized &&
+				((_chkUpperEnabled.Checked && upperType == LimitValueType.Percent) ||
+				 (_chkLowerEnabled.Checked && lowerType == LimitValueType.Percent)) && referencePrice <= 0)
 			{
 				MessageBox.Show("Prozentuale Limits benötigen einen Kauf-/Referenzkurs.",
 					"Referenzkurs fehlt", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -621,8 +895,9 @@ namespace StockWatcher.Forms
 				return;
 			}
 
-			if ((upperType == LimitValueType.Absolute && _nudUpper.Value < 0) ||
-				(lowerType == LimitValueType.Absolute && _nudLower.Value < 0))
+			if (entryType != WatchlistEntryType.Realized &&
+				((upperType == LimitValueType.Absolute && _nudUpper.Value < 0) ||
+				 (lowerType == LimitValueType.Absolute && _nudLower.Value < 0)))
 			{
 				MessageBox.Show("Absolute Limits dürfen nicht negativ sein. Negative Werte sind nur bei Prozent-Limits zulässig.",
 					"Eingabefehler", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -631,7 +906,8 @@ namespace StockWatcher.Forms
 			}
 
 			string quoteCurrency = NormalizeCurrency(_cmbQuoteCurrency.Text);
-			if (!_chkConvertToEur.Checked && string.IsNullOrEmpty(quoteCurrency) &&
+			if (entryType != WatchlistEntryType.Realized &&
+				!_chkConvertToEur.Checked && string.IsNullOrEmpty(quoteCurrency) &&
 				((_chkUpperEnabled.Checked && upperType == LimitValueType.Absolute) ||
 				 (_chkLowerEnabled.Checked && lowerType == LimitValueType.Absolute)))
 			{
@@ -650,14 +926,34 @@ namespace StockWatcher.Forms
 			double fxRate = string.IsNullOrEmpty(referenceCurrency) || referenceCurrency == "EUR"
 				? 1.0 : _fetchedReferenceFxRate;
 
+			TryParseDate(_txtSaleDate.Text, out DateTime saleDate);
+			string saleCurrency = NormalizeCurrency(_cmbSaleCurrency.Text);
+			if (entryType == WatchlistEntryType.Realized && string.IsNullOrEmpty(saleCurrency))
+			{
+				MessageBox.Show("Für einen realisierten Eintrag wird die Verkaufswährung benötigt.",
+					"Verkaufswährung fehlt", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+				DialogResult = DialogResult.None;
+				return;
+			}
+
+			if (entryType == WatchlistEntryType.Realized && saleDate == DateTime.MinValue)
+			{
+				MessageBox.Show("Für einen realisierten Eintrag wird das Verkaufsdatum benötigt.",
+					"Verkaufsdatum fehlt", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+				DialogResult = DialogResult.None;
+				return;
+			}
+
+			double saleFxRate = entryType == WatchlistEntryType.Realized
+				? (saleCurrency == "EUR" ? 1.0 : _fetchedSaleFxRate)
+				: _fetchedSaleFxRate;
+
 			string name = _txtName.Text.Trim();
 			Result = new WatchlistEntry
 			{
 				Isin                 = isin,
 				Name                 = string.IsNullOrEmpty(name) ? isin : name,
-				EntryType            = _cmbEntryType.SelectedIndex == 1
-				                           ? WatchlistEntryType.BuyCandidate
-				                           : WatchlistEntryType.Holding,
+				EntryType            = entryType,
 				Note                 = _txtNote.Text,
 				YahooSymbol          = HasResolvedSymbolFor(isin) ? _resolvedYahooSymbol : "",
 				QuoteCurrency        = quoteCurrency,
@@ -672,7 +968,12 @@ namespace StockWatcher.Forms
 				ReferencePrice       = referencePrice,
 				ReferenceCurrency    = referenceCurrency,
 				ReferenceDate        = referenceDate,
-				ReferenceFxRate      = fxRate
+				ReferenceFxRate      = fxRate,
+				IncomeEur            = incomeEur,
+				SalePrice            = salePrice,
+				SaleCurrency         = saleCurrency,
+				SaleDate             = saleDate,
+				SaleFxRate           = saleFxRate
 			};
 		}
 

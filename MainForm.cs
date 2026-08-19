@@ -24,6 +24,15 @@ namespace StockWatcher
 
 		// UI-Elemente
 		private ListView _listView;
+		private TabControl _tabControl;
+		private TabPage _tabOverview;
+		private TabPage _tabHolding;
+		private TabPage _tabBuyCandidate;
+		private TabPage _tabRealized;
+		private FlowLayoutPanel _overviewFilterPanel;
+		private CheckBox _chkOverviewHolding;
+		private CheckBox _chkOverviewBuyCandidate;
+		private CheckBox _chkOverviewRealized;
 		private ToolStrip _toolStrip;
 		private StatusStrip _statusStrip;
 		private ToolStripStatusLabel _lblStatus;
@@ -34,6 +43,7 @@ namespace StockWatcher
 		private System.Windows.Forms.Timer _layoutSaveTimer;
 		private NotifyIcon _notifyIcon;
 		private ContextMenuStrip _trayMenu;
+		private ContextMenuStrip _entryContextMenu;
 
 		// Sortierung
 		private readonly ListViewSorter _sorter = new ListViewSorter();
@@ -46,6 +56,7 @@ namespace StockWatcher
 		private bool _fetchRunning = false;
 		private DateTime _nextFetchTime = DateTime.MinValue;
 		private bool _restoringLayout = false;
+		private bool _allowMainWindowVisible = true;
 		private double? _previousPortfolioMarketValueEur = null;
 		private string _portfolioTrendIndicator = "◀▶";
 		private readonly Dictionary<WatchlistEntry, string> _priceTrendIndicators =
@@ -68,6 +79,7 @@ namespace StockWatcher
 		public MainForm()
 		{
 			_settings = AppSettings.Load();
+			_allowMainWindowVisible = !_settings.StartMinimized;
 			_client   = new StockFrankfurtClient();
 
 			_baseIcon = LoadAppIcon();
@@ -81,9 +93,6 @@ namespace StockWatcher
 			BuildTrayIcon();
 			RefreshListView();
 			StartTimers();
-
-			if (_settings.StartMinimized)
-				WindowState = FormWindowState.Minimized;
 
 			_ = FetchAllQuotesAsync();
 		}
@@ -155,29 +164,17 @@ namespace StockWatcher
 				Dock = DockStyle.Fill,
 				View = View.Details,
 				FullRowSelect = true,
+				MultiSelect = false,
 				GridLines = true,
 				Font = new Font("Consolas", 9.5f),
 				AllowColumnReorder = true
 			};
-			_listView.Columns.Add("Name", 240);
-			_listView.Columns.Add("ISIN", 120);
-			_listView.Columns.Add("Stk.", 55);
-			_listView.Columns.Add("Kauf-/Referenzkurs", 140);
-			_listView.Columns.Add("Kauf-/Referenzwert", 150);
-			_listView.Columns.Add("▲▼", 45, HorizontalAlignment.Center);
-			_listView.Columns.Add("Akt. Kurs", 130);
-			_listView.Columns.Add("Marktwert", 135);
-			_listView.Columns.Add("Diff. EUR", 105);
-			_listView.Columns.Add("Diff. %", 80);
-			_listView.Columns.Add("Limit ▼", 110);
-			_listView.Columns.Add("Limit ▲", 110);
-			_listView.Columns.Add("Eintragsart", 105);
-			_listView.Columns.Add("Bemerkung", 300);
-			_listView.Columns.Add("Status", 160); 
 			_disabledLimitFont = new Font(_listView.Font, FontStyle.Italic);
 			_listView.ListViewItemSorter = _sorter;
 			_listView.DoubleClick += (s, e) => OpenEditDialog();
 			_listView.ColumnClick += ListView_ColumnClick;
+			_listView.MouseDown += ListView_MouseDown;
+			BuildEntryContextMenu();
 			_listView.ColumnReordered += (s, e) =>
 			{
 				if (!_restoringLayout)
@@ -185,9 +182,37 @@ namespace StockWatcher
 			};
 			_listView.ColumnWidthChanged += (s, e) => ScheduleLayoutSave();
 
-			// Originaltexte der Spaltenköpfe sichern (für Pfeil-Indikator)
-			foreach (ColumnHeader col in _listView.Columns)
-				col.Tag = col.Text;
+			// Reiter: Übersicht + Detailansichten
+			_tabControl = new TabControl { Dock = DockStyle.Fill };
+			_tabOverview = new TabPage("Übersicht");
+			_tabHolding = new TabPage("Bestand");
+			_tabBuyCandidate = new TabPage("Kaufinteresse");
+			_tabRealized = new TabPage("Realisiert");
+
+			_overviewFilterPanel = new FlowLayoutPanel
+			{
+				Dock = DockStyle.Top,
+				Height = 31,
+				FlowDirection = FlowDirection.LeftToRight,
+				WrapContents = false,
+				Padding = new Padding(6, 4, 0, 0)
+			};
+			_chkOverviewHolding = new CheckBox { Text = "Bestand", AutoSize = true, Checked = true };
+			_chkOverviewBuyCandidate = new CheckBox { Text = "Kaufinteresse", AutoSize = true, Checked = true };
+			_chkOverviewRealized = new CheckBox { Text = "Realisiert", AutoSize = true, Checked = false };
+			_chkOverviewHolding.CheckedChanged += (s, e) => RefreshListView();
+			_chkOverviewBuyCandidate.CheckedChanged += (s, e) => RefreshListView();
+			_chkOverviewRealized.CheckedChanged += (s, e) => RefreshListView();
+			_overviewFilterPanel.Controls.Add(_chkOverviewHolding);
+			_overviewFilterPanel.Controls.Add(_chkOverviewBuyCandidate);
+			_overviewFilterPanel.Controls.Add(_chkOverviewRealized);
+
+			_tabOverview.Controls.Add(_listView);
+			_tabOverview.Controls.Add(_overviewFilterPanel);
+			_tabControl.TabPages.AddRange(new[] { _tabOverview, _tabHolding, _tabBuyCandidate, _tabRealized });
+			_tabControl.SelectedIndexChanged += TabControl_SelectedIndexChanged;
+
+			ConfigureColumnsForSelectedTab();
 
 			// Statusleiste
 			_lblStatus = new ToolStripStatusLabel("Bereit")
@@ -195,7 +220,7 @@ namespace StockWatcher
 				Spring = false,
 				TextAlign = ContentAlignment.MiddleLeft
 			};
-			_lblPortfolioSummary = new ToolStripStatusLabel("| ◀▶ | 0 Pos. | – EUR | – EUR")
+			_lblPortfolioSummary = new ToolStripStatusLabel("| ◀▶ | 0 Pos. | – EUR | offen – EUR | realisiert 0.00 EUR | gesamt – EUR")
 			{
 				Spring = false,
 				TextAlign = ContentAlignment.MiddleLeft
@@ -214,7 +239,7 @@ namespace StockWatcher
 			});
 
 			// Reihenfolge in Controls entscheidet über Dock-Anordnung (letzte = unten/aussen)
-			Controls.Add(_listView);      // Fill – wird als letztes platziert
+			Controls.Add(_tabControl);   // Fill – Reiter mit der gemeinsamen Listenansicht
 			Controls.Add(_toolStrip);     // Top – unter Menü
 			Controls.Add(menuStrip);      // Top – ganz oben
 			Controls.Add(_statusStrip);   // Bottom – ganz unten
@@ -223,6 +248,223 @@ namespace StockWatcher
 			LocationChanged += (s, e) => ScheduleLayoutSave();
 			SizeChanged += (s, e) => ScheduleLayoutSave();
 			ResizeEnd += (s, e) => ScheduleLayoutSave();
+		}
+
+		private bool IsOverviewTab => _tabControl != null && _tabControl.SelectedTab == _tabOverview;
+
+		private void TabControl_SelectedIndexChanged(object sender, EventArgs e)
+		{
+			if (_tabControl.SelectedTab != null)
+			{
+				_tabControl.SelectedTab.Controls.Add(_listView);
+
+				if (IsOverviewTab)
+				{
+					// In der Übersicht Platz für die Filterzeile oberhalb der Spaltenköpfe lassen.
+					_listView.Dock = DockStyle.None;
+					_listView.Anchor =
+						AnchorStyles.Top |
+						AnchorStyles.Bottom |
+						AnchorStyles.Left |
+						AnchorStyles.Right;
+
+					_listView.Location = new Point(0, _overviewFilterPanel.Height);
+					_listView.Size = new Size(
+						_tabOverview.ClientSize.Width,
+						Math.Max(0, _tabOverview.ClientSize.Height - _overviewFilterPanel.Height));
+				}
+				else
+				{
+					_listView.Dock = DockStyle.Fill;
+				}
+			}
+
+			ConfigureColumnsForSelectedTab();
+
+			if (IsOverviewTab)
+			{
+				RestoreColumnOrder();
+				RestoreColumnWidths();
+			}
+
+			RefreshListView();
+		}
+
+		private void ConfigureColumnsForSelectedTab()
+		{
+			if (_listView == null || _tabControl == null) return;
+
+			_restoringLayout = true;
+			try
+			{
+				_listView.BeginUpdate();
+				_listView.Items.Clear();
+				_listView.Columns.Clear();
+
+				if (_tabControl.SelectedTab == _tabRealized)
+				{
+					_listView.Columns.Add("Name", 240);
+					_listView.Columns.Add("ISIN", 120);
+					_listView.Columns.Add("Stk.", 60);
+					_listView.Columns.Add("Kaufdatum", 95);
+					_listView.Columns.Add("Kaufkurs", 125);
+					_listView.Columns.Add("Einstand EUR", 125);
+					_listView.Columns.Add("Verkaufsdatum", 105);
+					_listView.Columns.Add("Verkaufskurs", 125);
+					_listView.Columns.Add("Verkaufswert EUR", 135);
+					_listView.Columns.Add("G/V EUR", 105);
+					_listView.Columns.Add("G/V %", 80);
+					_listView.Columns.Add("Akt. Kurs", 125);
+					_listView.Columns.Add("Bemerkung", 300);
+					_listView.Columns.Add("Status", 170);
+				}
+				else
+				{
+					bool overview = _tabControl.SelectedTab == _tabOverview;
+					_listView.Columns.Add("Name", 240);
+					_listView.Columns.Add("ISIN", 120);
+					_listView.Columns.Add("Stk.", 55);
+					_listView.Columns.Add("Kauf-/Referenzkurs", 140);
+					_listView.Columns.Add("Kauf-/Referenzwert", 150);
+					_listView.Columns.Add("▲▼", 45, HorizontalAlignment.Center);
+					_listView.Columns.Add(overview ? "Kurs" : "Akt. Kurs", 130);
+					_listView.Columns.Add(overview ? "Wert" : "Marktwert", 135);
+					_listView.Columns.Add(overview ? "G/V EUR" : "Diff. EUR", 105);
+					_listView.Columns.Add(overview ? "G/V %" : "Diff. %", 80);
+					_listView.Columns.Add("Limit ▼", 110);
+					_listView.Columns.Add("Limit ▲", 110);
+					_listView.Columns.Add("Eintragsart", 105);
+					_listView.Columns.Add("Bemerkung", 300);
+					_listView.Columns.Add("Status", 160);
+				}
+
+				foreach (ColumnHeader col in _listView.Columns)
+					col.Tag = col.Text;
+
+				_sortCol = -1;
+				_sortDir = SortOrder.None;
+				_sorter.Column = 0;
+				_sorter.Order = SortOrder.Ascending;
+				_sorter.TreatAsDate = false;
+			}
+			finally
+			{
+				_listView.EndUpdate();
+				_restoringLayout = false;
+			}
+		}
+
+
+		private void BuildEntryContextMenu()
+		{
+			_entryContextMenu = new ContextMenuStrip();
+			_entryContextMenu.Items.Add("Neu laden (Refresh / Reload)", null,
+				(s, e) => RefreshSelectedEntry());
+			_entryContextMenu.Items.Add(new ToolStripSeparator());
+			_entryContextMenu.Items.Add("Kopiere in neue Bestandsposition", null,
+				(s, e) => CopySelectedEntry(WatchlistEntryType.Holding));
+			_entryContextMenu.Items.Add("Kopiere in neue Watchlist-Position", null,
+				(s, e) => CopySelectedEntry(WatchlistEntryType.BuyCandidate));
+			_entryContextMenu.Items.Add("Kopiere in neue realisierte Position", null,
+				(s, e) => CopySelectedEntry(WatchlistEntryType.Realized));
+			_entryContextMenu.Opening += (s, e) =>
+			{
+				if (_listView.SelectedItems.Count == 0)
+					e.Cancel = true;
+			};
+
+			_listView.ContextMenuStrip = _entryContextMenu;
+		}
+
+		private void ListView_MouseDown(object sender, MouseEventArgs e)
+		{
+			if (e.Button != MouseButtons.Right) return;
+
+			ListViewItem item = _listView.GetItemAt(e.X, e.Y);
+			if (item == null)
+			{
+				if (_listView.SelectedItems.Count > 0)
+					_listView.SelectedItems[0].Selected = false;
+				return;
+			}
+
+			item.Selected = true;
+			item.Focused = true;
+		}
+
+		private void RefreshSelectedEntry()
+		{
+			if (_listView.SelectedItems.Count == 0) return;
+			WatchlistEntry entry = (WatchlistEntry)_listView.SelectedItems[0].Tag;
+			_ = FetchSingleAsync(entry);
+		}
+
+		private void CopySelectedEntry(WatchlistEntryType targetType)
+		{
+			if (_listView.SelectedItems.Count == 0) return;
+
+			WatchlistEntry source = (WatchlistEntry)_listView.SelectedItems[0].Tag;
+			WatchlistEntry copy = CreateEntryCopyForType(source, targetType);
+
+			using (var dlg = new EditEntryDialog(_client, copy))
+			{
+				dlg.Text = targetType == WatchlistEntryType.Holding
+					? "Neue Bestandsposition aus Kopie"
+					: targetType == WatchlistEntryType.BuyCandidate
+						? "Neue Watchlist-Position aus Kopie"
+						: "Neue realisierte Position aus Kopie";
+
+				if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Result != null)
+				{
+					_settings.Watchlist.Add(dlg.Result);
+					_settings.Save();
+					RefreshListView();
+					_ = FetchSingleAsync(dlg.Result);
+				}
+			}
+		}
+
+		private static WatchlistEntry CreateEntryCopyForType(
+			WatchlistEntry source,
+			WatchlistEntryType targetType)
+		{
+			bool realizedTarget = targetType == WatchlistEntryType.Realized;
+			bool keepSaleData = realizedTarget && source.EntryType == WatchlistEntryType.Realized;
+
+			return new WatchlistEntry
+			{
+				Isin = source.Isin,
+				Name = source.Name,
+				EntryType = targetType,
+				Note = source.Note,
+				YahooSymbol = source.YahooSymbol,
+				QuoteCurrency = source.QuoteCurrency,
+				LimitUpper = realizedTarget ? 0.0 : source.LimitUpper,
+				LimitUpperType = source.LimitUpperType,
+				LimitUpperEnabled = !realizedTarget && source.LimitUpperEnabled,
+				LimitLower = realizedTarget ? 0.0 : source.LimitLower,
+				LimitLowerType = source.LimitLowerType,
+				LimitLowerEnabled = !realizedTarget && source.LimitLowerEnabled,
+				ConvertToEur = source.ConvertToEur,
+				Quantity = targetType == WatchlistEntryType.BuyCandidate ? 0.0 : source.Quantity,
+				ReferencePrice = source.ReferencePrice,
+				ReferenceCurrency = source.ReferenceCurrency,
+				ReferenceDate = source.ReferenceDate,
+				ReferenceFxRate = source.ReferenceFxRate,
+				// Erträge nie automatisch duplizieren, damit beim Kopieren keine
+				// bereits realisierten Cashflows versehentlich doppelt gezählt werden.
+				IncomeEur = 0.0,
+				SalePrice = keepSaleData ? source.SalePrice : 0.0,
+				SaleCurrency = keepSaleData ? source.SaleCurrency : "",
+				SaleDate = keepSaleData ? source.SaleDate : DateTime.MinValue,
+				SaleFxRate = keepSaleData ? source.SaleFxRate : 0.0,
+				LastPrice = source.LastPrice,
+				LastPriceEur = source.LastPriceEur,
+				FxRate = source.FxRate,
+				LastUpdate = source.LastUpdate,
+				LastSuccessfulQuoteFetch = source.LastSuccessfulQuoteFetch,
+				StatusText = source.StatusText
+			};
 		}
 
 		private void BuildTrayIcon()
@@ -245,12 +487,36 @@ namespace StockWatcher
 
 		private void ShowMainWindow()
 		{
-			if (!Visible) Show();
+			_allowMainWindowVisible = true;
+
+			if (!Visible)
+				Show();
+
 			if (WindowState == FormWindowState.Minimized)
 				WindowState = FormWindowState.Normal;
+
+			// Beim Start nur im Tray wird das Fenster erst jetzt erstmals vollständig
+			// dargestellt. Die Listenansicht deshalb nach der Fensterinitialisierung
+			// nochmals aus dem aktuellen Datenbestand aufbauen.
+			RefreshListView();
+
 			Activate();
 			SetForegroundWindow(Handle);
 			ClearTrayDot();
+		}
+
+		protected override void SetVisibleCore(bool value)
+		{
+			// "Starte minimiert" bedeutet bewusst: nur im Tray starten.
+			// Die erste Sichtbarschaltung durch Application.Run wird unterdrückt,
+			// damit weder Fenster noch Taskleisten-Vorschau erzeugt werden.
+			if (!_allowMainWindowVisible)
+			{
+				base.SetVisibleCore(false);
+				return;
+			}
+
+			base.SetVisibleCore(value);
 		}
 
 		// -----------------------------------------------------------------------
@@ -286,6 +552,8 @@ namespace StockWatcher
 
 		private void SaveColumnWidths()
 		{
+			if (!IsOverviewTab) return;
+
 			var parts = new string[_listView.Columns.Count];
 			for (int i = 0; i < _listView.Columns.Count; i++)
 				parts[i] = _listView.Columns[i].Width.ToString(CultureInfo.InvariantCulture);
@@ -294,7 +562,7 @@ namespace StockWatcher
 
 		private void RestoreColumnWidths()
 		{
-			if (string.IsNullOrWhiteSpace(_settings.ColumnWidths)) return;
+			if (!IsOverviewTab || string.IsNullOrWhiteSpace(_settings.ColumnWidths)) return;
 
 			string[] parts = _settings.ColumnWidths.Split(',');
 
@@ -413,6 +681,8 @@ namespace StockWatcher
 
 		private void SaveColumnOrder()
 		{
+			if (!IsOverviewTab) return;
+
 			var parts = new string[_listView.Columns.Count];
 			for (int i = 0; i < _listView.Columns.Count; i++)
 				parts[i] = _listView.Columns[i].DisplayIndex.ToString();
@@ -422,12 +692,13 @@ namespace StockWatcher
 
 		private void RestoreColumnOrder()
 		{
-			if (string.IsNullOrWhiteSpace(_settings.ColumnOrder)) return;
+			if (!IsOverviewTab || string.IsNullOrWhiteSpace(_settings.ColumnOrder)) return;
 			string[] parts = _settings.ColumnOrder.Split(',');
 
 			// Bei geänderter Spaltenstruktur bewusst das neue Default-Layout verwenden.
 			if (parts.Length != _listView.Columns.Count) return;
 
+			_restoringLayout = true;
 			try
 			{
 				// Aufsteigend nach Ziel-DisplayIndex setzen, um Konflikte zu vermeiden
@@ -446,6 +717,10 @@ namespace StockWatcher
 			catch
 			{
 				/* Fehler beim Wiederherstellen ignorieren */
+			}
+			finally
+			{
+				_restoringLayout = false;
 			}
 		}
 
@@ -472,6 +747,9 @@ namespace StockWatcher
 
 			_sorter.Column = _sortCol;
 			_sorter.Order  = _sortDir;
+			string baseColumnText = _listView.Columns[_sortCol].Tag as string ?? "";
+			_sorter.TreatAsDate = baseColumnText.IndexOf(
+				"datum", StringComparison.OrdinalIgnoreCase) >= 0;
 			_listView.Sort();
 		}
 
@@ -517,11 +795,12 @@ namespace StockWatcher
 			_lblStatus.Text = "Abruf läuft…";
 			_nextFetchTime = DateTime.Now.AddMilliseconds(_timer.Interval);
 
-			List<WatchlistEntry> watchlist = _settings.Watchlist;
-			for (int i = 0; i < watchlist.Count; i++)
+			var fetchEntries = new List<WatchlistEntry>(_settings.Watchlist);
+
+			for (int i = 0; i < fetchEntries.Count; i++)
 			{
-				WatchlistEntry entry = watchlist[i];
-				_lblStatus.Text = $"Abruf {i + 1}/{watchlist.Count}: {entry.Name}…";
+				WatchlistEntry entry = fetchEntries[i];
+				_lblStatus.Text = $"Abruf {i + 1}/{fetchEntries.Count}: {entry.Name}…";
 				await FetchQuoteIntoEntry(entry);
 			}
 
@@ -702,6 +981,20 @@ namespace StockWatcher
 					entry.ReferenceCurrency = dlg.Result.ReferenceCurrency;
 					entry.ReferenceDate     = dlg.Result.ReferenceDate;
 					entry.ReferenceFxRate   = dlg.Result.ReferenceFxRate;
+					entry.IncomeEur         = dlg.Result.IncomeEur;
+					entry.SalePrice         = dlg.Result.SalePrice;
+					entry.SaleCurrency      = dlg.Result.SaleCurrency;
+					entry.SaleDate          = dlg.Result.SaleDate;
+					entry.SaleFxRate        = dlg.Result.SaleFxRate;
+
+					if (entry.EntryType == WatchlistEntryType.Realized)
+					{
+						entry.UpperLimitReached = false;
+						entry.LowerLimitReached = false;
+						entry.AlarmUpperFired = false;
+						entry.AlarmLowerFired = false;
+					}
+
 					_settings.Save();
 					_ = FetchSingleAsync(entry);  // Kurs + FX sofort neu laden
 				}
@@ -739,6 +1032,8 @@ namespace StockWatcher
 
 		private async Task CheckLimitsAsync(WatchlistEntry entry)
 		{
+			if (entry.EntryType == WatchlistEntryType.Realized) return;
+
 			bool needsReferencePrice =
 				(entry.LimitUpperEnabled && entry.LimitUpperType == LimitValueType.Percent) ||
 				(entry.LimitLowerEnabled && entry.LimitLowerType == LimitValueType.Percent);
@@ -1046,19 +1341,95 @@ namespace StockWatcher
 			_listView.BeginUpdate();
 			_listView.Items.Clear();
 
-			foreach (WatchlistEntry entry in _settings.Watchlist)
+			if (_tabControl.SelectedTab == _tabRealized)
 			{
-				bool dataRetrievalTimedOut = IsDataRetrievalTimedOut(entry);
-				string displayedStatusText = dataRetrievalTimedOut
+				foreach (WatchlistEntry entry in _settings.Watchlist)
+				{
+					if (entry.EntryType == WatchlistEntryType.Realized)
+						AddRealizedDetailItem(entry);
+				}
+			}
+			else
+			{
+				foreach (WatchlistEntry entry in _settings.Watchlist)
+				{
+					if (!ShouldDisplayEntry(entry))
+						continue;
+
+					AddStandardListItem(entry);
+				}
+			}
+
+			UpdatePortfolioSummary(updatePortfolioTrend);
+			_listView.EndUpdate();
+		}
+
+		private bool ShouldDisplayEntry(WatchlistEntry entry)
+		{
+			if (_tabControl.SelectedTab == _tabHolding)
+				return entry.EntryType == WatchlistEntryType.Holding;
+			if (_tabControl.SelectedTab == _tabBuyCandidate)
+				return entry.EntryType == WatchlistEntryType.BuyCandidate;
+			if (_tabControl.SelectedTab != _tabOverview)
+				return false;
+
+			return entry.EntryType == WatchlistEntryType.Holding
+				? _chkOverviewHolding.Checked
+				: entry.EntryType == WatchlistEntryType.BuyCandidate
+					? _chkOverviewBuyCandidate.Checked
+					: entry.EntryType == WatchlistEntryType.Realized && _chkOverviewRealized.Checked;
+		}
+
+		private void AddStandardListItem(WatchlistEntry entry)
+		{
+			bool realized = entry.EntryType == WatchlistEntryType.Realized;
+			bool dataRetrievalTimedOut = !realized && IsDataRetrievalTimedOut(entry);
+			string displayedStatusText = realized
+				? entry.SaleDate != DateTime.MinValue
+					? $"Realisiert {entry.SaleDate:dd.MM.yyyy}"
+					: "Realisiert"
+				: dataRetrievalTimedOut
 					? "NOK: Timeout for Data Retrieval"
 					: entry.StatusText;
 
-				string priceTrendText = _priceTrendIndicators.TryGetValue(entry, out string priceTrend)
-					? priceTrend
-					: "◀▶";
+			string priceTrendText = realized
+				? "–"
+				: _priceTrendIndicators.TryGetValue(entry, out string priceTrend) ? priceTrend : "◀▶";
 
+			string priceText;
+			string valueText;
+			string diffAmtText;
+			string diffPctText;
+			Color diffColor;
+
+			if (realized)
+			{
+				priceText = entry.SalePrice > 0
+					? FormatPrice(entry.SalePrice, entry.EffectiveSaleCurrency)
+					: "–";
+
+				valueText = TryGetSaleValueEur(entry, out double saleValueEur)
+					? $"{saleValueEur:N2} EUR"
+					: "–";
+
+				if (TryGetRealizedGainLossEur(entry, out double realizedGainLossEur, out double realizedGainLossPct))
+				{
+					double displayAmt = NormalizeTwoDecimalDisplay(realizedGainLossEur);
+					double displayPct = NormalizeTwoDecimalDisplay(realizedGainLossPct);
+					diffAmtText = $"{(displayAmt > 0 ? "+" : "")}{displayAmt:N2} EUR";
+					diffPctText = $"{(displayPct > 0 ? "+" : "")}{displayPct:N2} %";
+					diffColor = realizedGainLossEur >= 0 ? Color.DarkGreen : Color.Firebrick;
+				}
+				else
+				{
+					diffAmtText = "–";
+					diffPctText = "–";
+					diffColor = SystemColors.WindowText;
+				}
+			}
+			else
+			{
 				// Kurs-Spalte: einheitlich mit ISO-Währungscode, kein €-Symbol
-				string priceText;
 				if (entry.LastPrice <= 0.0)
 				{
 					priceText = "–";
@@ -1074,38 +1445,22 @@ namespace StockWatcher
 						: $"{entry.LastPrice:N2} {entry.QuoteCurrency}";
 				}
 
-				string marketValueText = "–";
+				valueText = "–";
 				if (entry.Quantity > 0 && entry.LastPrice > 0)
 				{
 					if (entry.ConvertToEur && entry.LastPriceEur > 0)
 					{
-						marketValueText = $"{entry.Quantity * entry.LastPriceEur:N2} EUR";
+						valueText = $"{entry.Quantity * entry.LastPriceEur:N2} EUR";
 					}
 					else
 					{
 						double marketValue = entry.Quantity * entry.LastPrice;
-
-						marketValueText = string.IsNullOrWhiteSpace(entry.QuoteCurrency)
+						valueText = string.IsNullOrWhiteSpace(entry.QuoteCurrency)
 							? $"{marketValue:N2}"
 							: $"{marketValue:N2} {entry.QuoteCurrency}";
 					}
 				}
 
-				string upperText = FormatListLimit(entry, true);
-				string lowerText = FormatListLimit(entry, false);
-
-				string qtyText = entry.Quantity > 0
-					? entry.Quantity.ToString("N0")
-					: "–";
-				string referenceText = entry.ReferencePrice > 0
-					? $"{entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
-					: "–";
-				string referenceValueText =
-					entry.Quantity > 0 && entry.ReferencePrice > 0
-						? $"{entry.Quantity * entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
-						: "–";
-
-				// P&L immer in EUR (Kauf-/Referenzkurs × historischer FX → EUR-Basis)
 				double effectiveFx = entry.EffectiveReferenceFxRate;
 				bool hasDiff = entry.Quantity > 0 &&
 				               entry.ReferencePrice > 0 &&
@@ -1119,95 +1474,263 @@ namespace StockWatcher
 
 				double displayDiffAmt = NormalizeTwoDecimalDisplay(diffAmt);
 				double displayDiffPct = NormalizeTwoDecimalDisplay(diffPct);
-				string S(double v) => v > 0 ? "+" : "";
-				string diffAmtText = hasDiff ? $"{S(displayDiffAmt)}{displayDiffAmt:N2} EUR" : "–";
-				string diffPctText = hasDiff ? $"{S(displayDiffPct)}{displayDiffPct:N2} %" : "–";
-				Color diffColor = hasDiff ? (diffAmt >= 0 ? Color.DarkGreen : Color.Firebrick) : SystemColors.WindowText;
+				diffAmtText = hasDiff ? $"{(displayDiffAmt > 0 ? "+" : "")}{displayDiffAmt:N2} EUR" : "–";
+				diffPctText = hasDiff ? $"{(displayDiffPct > 0 ? "+" : "")}{displayDiffPct:N2} %" : "–";
+				diffColor = hasDiff ? (diffAmt >= 0 ? Color.DarkGreen : Color.Firebrick) : SystemColors.WindowText;
+			}
 
-				string typeText = entry.EntryType == WatchlistEntryType.BuyCandidate
-					? "Kaufkandidat" : "Bestand";
-				string noteText = (entry.Note ?? "")
-					.Replace("\r\n", " ")
-					.Replace("\r", " ")
-					.Replace("\n", " ");
+			string qtyText = entry.Quantity > 0 ? entry.Quantity.ToString("N0") : "–";
+			string referenceText = entry.ReferencePrice > 0
+				? $"{entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
+				: "–";
+			string referenceValueText = entry.Quantity > 0 && entry.ReferencePrice > 0
+				? $"{entry.Quantity * entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
+				: "–";
 
-				var item = new ListViewItem(entry.Name) { UseItemStyleForSubItems = false };
+			string upperText = realized ? "–" : FormatListLimit(entry, true);
+			string lowerText = realized ? "–" : FormatListLimit(entry, false);
+			string typeText = entry.EntryType == WatchlistEntryType.BuyCandidate
+				? "Kaufinteresse"
+				: entry.EntryType == WatchlistEntryType.Realized ? "Realisiert" : "Bestand";
+			string noteText = NormalizeNote(entry.Note);
 
-				var siIsin = new ListViewItem.ListViewSubItem
-				{
-					Text = entry.Isin
-				};
-				item.SubItems.Add(siIsin);
-				item.SubItems.Add(qtyText);
-				item.SubItems.Add(referenceText);
-				item.SubItems.Add(referenceValueText);
-				item.SubItems.Add(priceTrendText);
-				item.SubItems.Add(priceText);
-				item.SubItems.Add(marketValueText);
+			var item = new ListViewItem(entry.Name) { UseItemStyleForSubItems = false };
+			var siIsin = new ListViewItem.ListViewSubItem { Text = entry.Isin };
+			item.SubItems.Add(siIsin);
+			item.SubItems.Add(qtyText);
+			item.SubItems.Add(referenceText);
+			item.SubItems.Add(referenceValueText);
+			item.SubItems.Add(priceTrendText);
+			item.SubItems.Add(priceText);
+			item.SubItems.Add(valueText);
 
-				var siDiffAmt = new ListViewItem.ListViewSubItem
-				{
-					Text = diffAmtText,
-					ForeColor = diffColor
-				};
+			var siDiffAmt = new ListViewItem.ListViewSubItem { Text = diffAmtText, ForeColor = diffColor };
+			var siDiffPct = new ListViewItem.ListViewSubItem { Text = diffPctText, ForeColor = diffColor };
+			item.SubItems.Add(siDiffAmt);
+			item.SubItems.Add(siDiffPct);
 
-				var siDiffPct = new ListViewItem.ListViewSubItem
-				{
-					Text = diffPctText,
-					ForeColor = diffColor
-				};
+			var siLower = new ListViewItem.ListViewSubItem { Text = lowerText };
+			if (realized || !entry.LimitLowerEnabled)
+			{
+				siLower.ForeColor = Color.Gray;
+				siLower.Font = _disabledLimitFont;
+			}
+			item.SubItems.Add(siLower);
 
-				item.SubItems.Add(siDiffAmt);
-				item.SubItems.Add(siDiffPct);
+			var siUpper = new ListViewItem.ListViewSubItem { Text = upperText };
+			if (realized || !entry.LimitUpperEnabled)
+			{
+				siUpper.ForeColor = Color.Gray;
+				siUpper.Font = _disabledLimitFont;
+			}
+			item.SubItems.Add(siUpper);
 
-				// Unteres Limit zuerst
-				var siLower = new ListViewItem.ListViewSubItem { Text = lowerText };
-				if (!entry.LimitLowerEnabled)
-				{
-					siLower.ForeColor = Color.Gray;
-					siLower.Font = _disabledLimitFont;
-				}
-				item.SubItems.Add(siLower);
+			item.SubItems.Add(typeText);
+			item.SubItems.Add(noteText);
+			var siStatus = new ListViewItem.ListViewSubItem { Text = displayedStatusText };
+			item.SubItems.Add(siStatus);
 
-				// Oberes Limit danach
-				var siUpper = new ListViewItem.ListViewSubItem { Text = upperText };
-				if (!entry.LimitUpperEnabled)
-				{
-					siUpper.ForeColor = Color.Gray;
-					siUpper.Font = _disabledLimitFont;
-				}
-				item.SubItems.Add(siUpper);
-
-				item.SubItems.Add(typeText);
-				item.SubItems.Add(noteText);
-				var siStatus = new ListViewItem.ListViewSubItem
-				{
-					Text = displayedStatusText
-				};
-				item.SubItems.Add(siStatus);
-
+			if (!realized)
+			{
 				if (entry.UpperLimitReached)
 					item.BackColor = Color.FromArgb(200, 255, 200);
 				else if (entry.LowerLimitReached)
 					item.BackColor = Color.FromArgb(255, 200, 200);
-
-				if (dataRetrievalTimedOut)
-				{
-					Color warningColor = Color.LightYellow;
-					item.SubItems[0].BackColor = warningColor;
-					siIsin.BackColor = warningColor;
-					siStatus.BackColor = warningColor;
-				}
-
-				item.Tag = entry;
-				_listView.Items.Add(item);
 			}
 
-			UpdatePortfolioSummary(updatePortfolioTrend);
-			_listView.EndUpdate();
+			if (dataRetrievalTimedOut)
+			{
+				Color warningColor = Color.LightYellow;
+				item.SubItems[0].BackColor = warningColor;
+				siIsin.BackColor = warningColor;
+				siStatus.BackColor = warningColor;
+			}
+
+			item.Tag = entry;
+			_listView.Items.Add(item);
 		}
 
-		// -----------------------------------------------------------------------
+		private void AddRealizedDetailItem(WatchlistEntry entry)
+		{
+			bool dataRetrievalTimedOut = IsDataRetrievalTimedOut(entry);
+			string qtyText = entry.Quantity > 0 ? entry.Quantity.ToString("N0") : "–";
+			string buyDateText = entry.ReferenceDate != DateTime.MinValue ? entry.ReferenceDate.ToString("dd.MM.yyyy") : "–";
+			string buyPriceText = entry.ReferencePrice > 0
+				? FormatPrice(entry.ReferencePrice, entry.EffectiveReferenceCurrency)
+				: "–";
+			string referenceValueText = TryGetReferenceValueEur(entry, out double referenceValueEur)
+				? $"{referenceValueEur:N2} EUR"
+				: "–";
+			string saleDateText = entry.SaleDate != DateTime.MinValue ? entry.SaleDate.ToString("dd.MM.yyyy") : "–";
+			string salePriceText = entry.SalePrice > 0
+				? FormatPrice(entry.SalePrice, entry.EffectiveSaleCurrency)
+				: "–";
+			string saleValueText = TryGetSaleValueEur(entry, out double saleValueEur)
+				? $"{saleValueEur:N2} EUR"
+				: "–";
+
+			string currentPriceText;
+			if (entry.LastPrice <= 0.0)
+			{
+				currentPriceText = "–";
+			}
+			else if (entry.ConvertToEur && entry.LastPriceEur > 0.0)
+			{
+				currentPriceText = $"{entry.LastPriceEur:N2} EUR";
+			}
+			else
+			{
+				currentPriceText = string.IsNullOrWhiteSpace(entry.QuoteCurrency)
+					? entry.LastPrice.ToString("N2")
+					: $"{entry.LastPrice:N2} {entry.QuoteCurrency}";
+			}
+
+			string gainLossText = "–";
+			string gainLossPctText = "–";
+			Color gainLossColor = SystemColors.WindowText;
+			if (TryGetRealizedGainLossEur(entry, out double gainLossEur, out double gainLossPct))
+			{
+				double displayAmt = NormalizeTwoDecimalDisplay(gainLossEur);
+				double displayPct = NormalizeTwoDecimalDisplay(gainLossPct);
+				gainLossText = $"{(displayAmt > 0 ? "+" : "")}{displayAmt:N2} EUR";
+				gainLossPctText = $"{(displayPct > 0 ? "+" : "")}{displayPct:N2} %";
+				gainLossColor = gainLossEur >= 0 ? Color.DarkGreen : Color.Firebrick;
+			}
+
+			string statusText = dataRetrievalTimedOut
+				? "NOK: Timeout for Data Retrieval"
+				: entry.StatusText;
+
+			var item = new ListViewItem(entry.Name) { UseItemStyleForSubItems = false };
+			var siIsin = new ListViewItem.ListViewSubItem { Text = entry.Isin };
+			item.SubItems.Add(siIsin);
+			item.SubItems.Add(qtyText);
+			item.SubItems.Add(buyDateText);
+			item.SubItems.Add(buyPriceText);
+			item.SubItems.Add(referenceValueText);
+			item.SubItems.Add(saleDateText);
+			item.SubItems.Add(salePriceText);
+			item.SubItems.Add(saleValueText);
+
+			item.SubItems.Add(new ListViewItem.ListViewSubItem { Text = gainLossText, ForeColor = gainLossColor });
+			item.SubItems.Add(new ListViewItem.ListViewSubItem { Text = gainLossPctText, ForeColor = gainLossColor });
+
+			var siCurrentPrice = new ListViewItem.ListViewSubItem { Text = currentPriceText };
+			int currentVsSale = CompareCurrentPriceToSalePrice(entry);
+			if (currentVsSale > 0)
+				siCurrentPrice.ForeColor = Color.DarkGreen;
+			else if (currentVsSale < 0)
+				siCurrentPrice.ForeColor = Color.Firebrick;
+			item.SubItems.Add(siCurrentPrice);
+
+			item.SubItems.Add(NormalizeNote(entry.Note));
+
+			var siStatus = new ListViewItem.ListViewSubItem { Text = statusText };
+			item.SubItems.Add(siStatus);
+
+			if (dataRetrievalTimedOut)
+			{
+				Color warningColor = Color.LightYellow;
+				item.SubItems[0].BackColor = warningColor;
+				siIsin.BackColor = warningColor;
+				siCurrentPrice.BackColor = warningColor;
+				siStatus.BackColor = warningColor;
+			}
+
+			item.Tag = entry;
+			_listView.Items.Add(item);
+		}
+
+		private static string NormalizeNote(string note) =>
+			(note ?? "")
+				.Replace("\r\n", " ")
+				.Replace("\r", " ")
+				.Replace("\n", " ");
+
+		private static int CompareCurrentPriceToSalePrice(WatchlistEntry entry)
+		{
+			if (entry == null || entry.LastPrice <= 0.0 || entry.SalePrice <= 0.0)
+				return 0;
+
+			string quoteCurrency = (entry.QuoteCurrency ?? "").Trim().ToUpperInvariant();
+			string saleCurrency = (entry.EffectiveSaleCurrency ?? "").Trim().ToUpperInvariant();
+			double saleFx = entry.EffectiveSaleFxRate;
+
+			// Wenn der aktuelle Kurs in der Liste als EUR angezeigt wird, auch den
+			// Verkaufskurs für den Farbvergleich auf EUR normalisieren.
+			if (entry.ConvertToEur && entry.LastPriceEur > 0.0 && saleFx > 0.0)
+			{
+				double currentComparable = Math.Round(
+					entry.LastPriceEur, 2, MidpointRounding.AwayFromZero);
+				double saleComparable = Math.Round(
+					entry.SalePrice * saleFx, 2, MidpointRounding.AwayFromZero);
+				return currentComparable.CompareTo(saleComparable);
+			}
+
+			// Gleiche Währung: den tatsächlichen Kurs direkt vergleichen.
+			if (!string.IsNullOrEmpty(quoteCurrency) &&
+				string.Equals(quoteCurrency, saleCurrency, StringComparison.OrdinalIgnoreCase))
+			{
+				double currentComparable = Math.Round(
+					entry.LastPrice, 2, MidpointRounding.AwayFromZero);
+				double saleComparable = Math.Round(
+					entry.SalePrice, 2, MidpointRounding.AwayFromZero);
+				return currentComparable.CompareTo(saleComparable);
+			}
+
+			// Unterschiedliche Währungen: auf EUR normalisieren, sofern beide Werte
+			// verfügbar sind.
+			if (entry.LastPriceEur > 0.0 && saleFx > 0.0)
+			{
+				double currentComparable = Math.Round(
+					entry.LastPriceEur, 2, MidpointRounding.AwayFromZero);
+				double saleComparable = Math.Round(
+					entry.SalePrice * saleFx, 2, MidpointRounding.AwayFromZero);
+				return currentComparable.CompareTo(saleComparable);
+			}
+
+			return 0;
+		}
+
+		private static bool TryGetReferenceValueEur(WatchlistEntry entry, out double valueEur)
+		{
+			valueEur = 0.0;
+			double fx = entry.EffectiveReferenceFxRate;
+			if (entry.Quantity <= 0 || entry.ReferencePrice <= 0 || fx <= 0)
+				return false;
+
+			valueEur = entry.Quantity * entry.ReferencePrice * fx;
+			return true;
+		}
+
+		private static bool TryGetSaleValueEur(WatchlistEntry entry, out double valueEur)
+		{
+			valueEur = 0.0;
+			double fx = entry.EffectiveSaleFxRate;
+			if (entry.Quantity <= 0 || entry.SalePrice <= 0 || fx <= 0)
+				return false;
+
+			valueEur = entry.Quantity * entry.SalePrice * fx;
+			return true;
+		}
+
+		private static bool TryGetRealizedGainLossEur(
+			WatchlistEntry entry,
+			out double gainLossEur,
+			out double gainLossPct)
+		{
+			gainLossEur = 0.0;
+			gainLossPct = 0.0;
+			if (!TryGetReferenceValueEur(entry, out double referenceValueEur) ||
+				!TryGetSaleValueEur(entry, out double saleValueEur) ||
+				referenceValueEur <= 0)
+				return false;
+
+			gainLossEur = saleValueEur - referenceValueEur + entry.IncomeEur;
+			gainLossPct = gainLossEur / referenceValueEur * 100.0;
+			return true;
+		}
+
 		private bool IsDataRetrievalTimedOut(WatchlistEntry entry)
 		{
 			if (_settings.DataRetrievalTimeoutMinutes <= 0 ||
@@ -1229,34 +1752,51 @@ namespace StockWatcher
 		{
 			int positionCount = 0;
 			double totalMarketValueEur = 0.0;
-			double totalDiffEur = 0.0;
+			double totalOpenGainLossEur = 0.0;
+			double totalRealizedGainLossEur = 0.0;
+			double totalIncomeEur = 0.0;
 			bool marketValueComplete = true;
-			bool diffComplete = true;
+			bool openGainLossComplete = true;
+			bool realizedGainLossComplete = true;
 
 			foreach (WatchlistEntry entry in _settings.Watchlist)
 			{
-				if (entry.EntryType != WatchlistEntryType.Holding || entry.Quantity <= 0)
-					continue;
+				totalIncomeEur += entry.IncomeEur;
 
-				positionCount++;
-
-				if (entry.LastPriceEur > 0)
-					totalMarketValueEur += entry.Quantity * entry.LastPriceEur;
-				else
-					marketValueComplete = false;
-
-				double effectiveFx = entry.EffectiveReferenceFxRate;
-				if (entry.ReferencePrice > 0 && entry.LastPriceEur > 0 && effectiveFx > 0)
+				if (entry.EntryType == WatchlistEntryType.Holding && entry.Quantity > 0)
 				{
-					double referenceEur = entry.Quantity * entry.ReferencePrice * effectiveFx;
-					double currentEur = entry.Quantity * entry.LastPriceEur;
-					totalDiffEur += currentEur - referenceEur;
+					positionCount++;
+
+					if (entry.LastPriceEur > 0)
+						totalMarketValueEur += entry.Quantity * entry.LastPriceEur;
+					else
+						marketValueComplete = false;
+
+					if (TryGetReferenceValueEur(entry, out double referenceValueEur) && entry.LastPriceEur > 0)
+					{
+						double currentValueEur = entry.Quantity * entry.LastPriceEur;
+						totalOpenGainLossEur += currentValueEur - referenceValueEur;
+					}
+					else
+					{
+						openGainLossComplete = false;
+					}
 				}
-				else
+				else if (entry.EntryType == WatchlistEntryType.Realized)
 				{
-					diffComplete = false;
+					if (TryGetReferenceValueEur(entry, out double referenceValueEur) &&
+						TryGetSaleValueEur(entry, out double saleValueEur))
+					{
+						totalRealizedGainLossEur += saleValueEur - referenceValueEur;
+					}
+					else
+					{
+						realizedGainLossComplete = false;
+					}
 				}
 			}
+
+			totalRealizedGainLossEur += totalIncomeEur;
 
 			if (updateTrend && marketValueComplete)
 			{
@@ -1284,21 +1824,25 @@ namespace StockWatcher
 			string marketValueText = marketValueComplete
 				? $"{totalMarketValueEur:N2} EUR"
 				: "– EUR";
-
-			string diffText;
-			if (!diffComplete)
-			{
-				diffText = "– EUR";
-			}
-			else
-			{
-				double displayDiff = NormalizeTwoDecimalDisplay(totalDiffEur);
-				string sign = displayDiff > 0 ? "+" : "";
-				diffText = $"{sign}{displayDiff:N2} EUR";
-			}
+			string openText = openGainLossComplete
+				? FormatSignedEur(totalOpenGainLossEur)
+				: "– EUR";
+			string realizedText = realizedGainLossComplete
+				? FormatSignedEur(totalRealizedGainLossEur)
+				: "– EUR";
+			string totalText = openGainLossComplete && realizedGainLossComplete
+				? FormatSignedEur(totalOpenGainLossEur + totalRealizedGainLossEur)
+				: "– EUR";
 
 			_lblPortfolioSummary.Text =
-				$"| {_portfolioTrendIndicator} | {positionCount} Pos. | {marketValueText} | {diffText}";
+				$"| {_portfolioTrendIndicator} | {positionCount} Pos. | {marketValueText} | " +
+				$"offen {openText} | realisiert {realizedText} | gesamt {totalText}";
+		}
+
+		private static string FormatSignedEur(double value)
+		{
+			double displayValue = NormalizeTwoDecimalDisplay(value);
+			return $"{(displayValue > 0 ? "+" : "")}{displayValue:N2} EUR";
 		}
 
 		// -----------------------------------------------------------------------
@@ -1343,6 +1887,7 @@ namespace StockWatcher
 				_client?.Dispose();
 				_disabledLimitFont?.Dispose();
 				_notifyIcon?.Dispose();
+				_entryContextMenu?.Dispose();
 				_timer?.Dispose();
 				_countdownTimer?.Dispose();
 				_layoutSaveTimer?.Dispose();
@@ -1415,6 +1960,7 @@ namespace StockWatcher
 		{
 			public int Column { get; set; } = 0;
 			public SortOrder Order { get; set; } = SortOrder.Ascending;
+			public bool TreatAsDate { get; set; } = false;
 
 			public int Compare(object x, object y)
 			{
@@ -1431,14 +1977,36 @@ namespace StockWatcher
 				if (emptyX) return 1;
 				if (emptyY) return -1;
 
-				// Numerisch vergleichen wenn möglich, sonst alphabetisch
+				// Datumsspalten chronologisch vergleichen; andere Spalten numerisch,
+				// wenn möglich, sonst alphabetisch.
 				int result;
-				if (TryNum(sx, out double dx) && TryNum(sy, out double dy))
+				if (TreatAsDate && TryDate(sx, out DateTime dateX) && TryDate(sy, out DateTime dateY))
+					result = dateX.CompareTo(dateY);
+				else if (TryNum(sx, out double dx) && TryNum(sy, out double dy))
 					result = dx.CompareTo(dy);
 				else
 					result = string.Compare(sx, sy, StringComparison.CurrentCultureIgnoreCase);
 
 				return Order == SortOrder.Ascending ? result : -result;
+			}
+
+			private static bool TryDate(string s, out DateTime value)
+			{
+				string[] formats =
+				{
+					"dd.MM.yyyy",
+					"d.M.yyyy",
+					"d.MM.yyyy",
+					"dd.M.yyyy",
+					"yyyy-MM-dd"
+				};
+
+				return DateTime.TryParseExact(
+					s.Trim(),
+					formats,
+					CultureInfo.InvariantCulture,
+					DateTimeStyles.None,
+					out value);
 			}
 
 			/// <summary>

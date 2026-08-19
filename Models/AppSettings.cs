@@ -125,6 +125,11 @@ namespace StockWatcher.Models
 							ReferenceCurrency    = (el.Element("ReferenceCurrency")?.Value ?? "").Trim().ToUpperInvariant(),
 							ReferenceDate        = ParseDate(el.Element("ReferenceDate")?.Value),
 							ReferenceFxRate      = ParseInv(el.Element("ReferenceFxRate")?.Value),
+							IncomeEur            = ParseInv(el.Element("IncomeEur")?.Value),
+							SalePrice            = ParseInv(el.Element("SalePrice")?.Value),
+							SaleCurrency         = (el.Element("SaleCurrency")?.Value ?? "").Trim().ToUpperInvariant(),
+							SaleDate             = ParseDate(el.Element("SaleDate")?.Value),
+							SaleFxRate           = ParseInv(el.Element("SaleFxRate")?.Value),
 							LastPrice            = ParseInv(el.Element("LastPrice")?.Value),
 							LastPriceEur         = ParseInv(el.Element("LastPriceEur")?.Value),
 							FxRate               = ParseInv(el.Element("FxRate")?.Value) is double fx && fx > 0 ? fx : 1.0,
@@ -164,6 +169,8 @@ namespace StockWatcher.Models
 						"\tSpeicherort frei wählbar – auch in einer Cloud-Synchronisations-Ablage.\r\n" +
 						"\tQuoteCurrency = Kurs-/Listingwährung des ausgewählten Symbols.\r\n" +
 						"\tReferencePrice/ReferenceCurrency = Kauf-/Referenzbasis; ReferenceDate ist optional.\r\n" +
+						"\tIncomeEur = manuell erfasste Erträge/Dividenden in EUR.\r\n" +
+						"\tSalePrice/SaleCurrency/SaleDate/SaleFxRate = Verkaufsdaten realisierter Positionen.\r\n" +
 						"\tAbsolute Limits: EUR wenn ConvertToEur=true, sonst QuoteCurrency.\r\n" +
 						"\tPercent Limits: Prozentänderung relativ zu ReferencePrice, Vergleich in ReferenceCurrency; aktiv nur über Limit*Enabled.\r\n" +
 						"\tDezimaltrennzeichen: Punkt (Invariant-Format). Manuelle Bearbeitung möglich.\r\n"
@@ -234,6 +241,12 @@ namespace StockWatcher.Models
 					new XElement("ReferenceDate",        e.ReferenceDate == DateTime.MinValue
 					                                            ? "" : e.ReferenceDate.ToString("yyyy-MM-dd")),
 					new XElement("ReferenceFxRate",      Inv(e.ReferenceFxRate)),
+					new XElement("IncomeEur",            Inv(e.IncomeEur)),
+					new XElement("SalePrice",            Inv(e.SalePrice)),
+					new XElement("SaleCurrency",         e.SaleCurrency ?? ""),
+					new XElement("SaleDate",             e.SaleDate == DateTime.MinValue
+					                                            ? "" : e.SaleDate.ToString("yyyy-MM-dd")),
+					new XElement("SaleFxRate",           Inv(e.SaleFxRate)),
 					new XElement("EntryType",            e.EntryType.ToString()),
 					new XElement("Note",                 e.Note ?? ""),
 					new XElement("LastPrice",            Inv(e.LastPrice)),

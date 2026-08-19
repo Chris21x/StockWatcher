@@ -5,7 +5,8 @@ namespace StockWatcher.Models
 	public enum WatchlistEntryType
 	{
 		Holding = 0,
-		BuyCandidate = 1
+		BuyCandidate = 1,
+		Realized = 2
 	}
 
 	public enum LimitValueType
@@ -37,6 +38,16 @@ namespace StockWatcher.Models
 		public string ReferenceCurrency { get; set; } = ""; // Kauf-/Referenzwährung, z.B. "EUR", "CHF"
 		public DateTime ReferenceDate { get; set; } = DateTime.MinValue;
 		public double ReferenceFxRate { get; set; } = 0.0;   // historischer Kurs ReferenceCurrency→EUR am Referenzdatum
+
+		// Bereits zugeflossene Erträge/Ausschüttungen. Der eingetragene EUR-Betrag
+		// wird bewusst ohne Netto-/Brutto- oder Steuerlogik verwendet.
+		public double IncomeEur { get; set; } = 0.0;
+
+		// Verkaufsdaten für realisierte Positionen.
+		public double SalePrice { get; set; } = 0.0;
+		public string SaleCurrency { get; set; } = "";
+		public DateTime SaleDate { get; set; } = DateTime.MinValue;
+		public double SaleFxRate { get; set; } = 0.0;         // historischer Kurs SaleCurrency→EUR am Verkaufsdatum
 
 		// ---- Laufzeitdaten (werden zur Diagnose mitpersistiert) ----
 		public double LastPrice { get; set; } = 0.0;         // Kurs in QuoteCurrency
@@ -78,5 +89,16 @@ namespace StockWatcher.Models
 		public double EffectiveReferenceFxRate =>
 			string.Equals(EffectiveReferenceCurrency, "EUR", StringComparison.OrdinalIgnoreCase)
 				? 1.0 : ReferenceFxRate;
+
+		/// <summary>Effektive Verkaufswährung.</summary>
+		public string EffectiveSaleCurrency =>
+			(SaleCurrency ?? "").Trim().ToUpperInvariant();
+
+		/// <summary>Effektiver FX-Faktor Verkaufswährung→EUR; leere Währung bleibt ungültig.</summary>
+		public double EffectiveSaleFxRate =>
+			string.IsNullOrEmpty(EffectiveSaleCurrency)
+				? 0.0
+				: string.Equals(EffectiveSaleCurrency, "EUR", StringComparison.OrdinalIgnoreCase)
+					? 1.0 : SaleFxRate;
 	}
 }
