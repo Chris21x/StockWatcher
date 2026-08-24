@@ -17,6 +17,8 @@ namespace StockWatcher.Services
 		public string Currency { get; set; } = "";
 		public DateTime Timestamp { get; set; }
 		public string ErrorMessage { get; set; } = "";
+		/// <summary>Temporärer Provider-/Netzwerkfehler; darf keinen Symbol-Neulookup auslösen.</summary>
+		public bool IsTransientFailure { get; set; }
 		/// <summary>Aufgelöstes Yahoo-Symbol (z.B. "NESN.SW") – zum Persistieren im Eintrag.</summary>
 		public string ResolvedSymbol { get; set; } = "";
 	}
@@ -102,10 +104,10 @@ namespace StockWatcher.Services
 		// Crumb-Authentifizierung + GDPR-Consent-Handling
 		// -----------------------------------------------------------------------
 
-		private async Task EnsureCrumbAsync()
+		private async Task EnsureCrumbAsync(CancellationToken cancellationToken = default(CancellationToken))
 		{
 			if (_crumbAttempted) return;
-			await _crumbLock.WaitAsync();
+			await _crumbLock.WaitAsync(cancellationToken);
 			try
 			{
 				if (_crumbAttempted) return;
@@ -124,7 +126,7 @@ namespace StockWatcher.Services
 					using (var initClient = new HttpClient(initHandler) { Timeout = TimeSpan.FromSeconds(15) })
 					{
 						SetBrowserHeaders(initClient);
-						HttpResponseMessage resp = await initClient.GetAsync("https://finance.yahoo.com/");
+						HttpResponseMessage resp = await initClient.GetAsync("https://finance.yahoo.com/", cancellationToken);
 
 						int status = (int)resp.StatusCode;
 						if (status >= 300 && status < 400)
@@ -137,34 +139,51 @@ namespace StockWatcher.Services
 
 								if (location.Host.IndexOf("consent.yahoo.com",
 								        StringComparison.OrdinalIgnoreCase) >= 0)
-									await HandleConsentAsync(location);
+									await HandleConsentAsync(location, cancellationToken);
 								else
-									await _http.GetAsync(location);
+									await _http.GetAsync(location, cancellationToken);
 							}
 						}
 					}
 				}
+				catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
 				catch { }
 
 				// Schritt 2: Crumb holen
 				try
 				{
-					string crumb = await _http.GetStringAsync(
-						"https://query2.finance.yahoo.com/v1/test/getcrumb");
-					crumb = crumb?.Trim().Trim('"');
-					if (!string.IsNullOrWhiteSpace(crumb) && crumb != "null" && crumb.Length < 50)
-						_crumb = crumb;
+					using (HttpResponseMessage crumbResponse = await _http.GetAsync(
+						"https://query2.finance.yahoo.com/v1/test/getcrumb", cancellationToken))
+					{
+						if (!crumbResponse.IsSuccessStatusCode) return;
+						string crumb = await crumbResponse.Content.ReadAsStringAsync();
+						crumb = crumb?.Trim().Trim('"');
+						if (!string.IsNullOrWhiteSpace(crumb) && crumb != "null" && crumb.Length < 50)
+							_crumb = crumb;
+					}
 				}
+				catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
 				catch { }
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				_crumb = null;
+				_crumbAttempted = false;
+				throw;
 			}
 			finally { _crumbLock.Release(); }
 		}
 
-		private async Task HandleConsentAsync(Uri consentUri)
+		private async Task HandleConsentAsync(Uri consentUri, CancellationToken cancellationToken)
 		{
 			try
 			{
-				string html = await _http.GetStringAsync(consentUri);
+				string html;
+				using (HttpResponseMessage response = await _http.GetAsync(consentUri, cancellationToken))
+				{
+					if (!response.IsSuccessStatusCode) return;
+					html = await response.Content.ReadAsStringAsync();
+				}
 
 				string csrf = null;
 				var m = Regex.Match(html, @"""csrfToken""\s*:\s*""([^""]+)""");
@@ -192,8 +211,9 @@ namespace StockWatcher.Services
 					new KeyValuePair<string,string>("namespace",        "yahoo"),
 					new KeyValuePair<string,string>("agree",            "agree")
 				});
-				await _http.PostAsync("https://consent.yahoo.com/v2/collectConsent", formData);
+				await _http.PostAsync("https://consent.yahoo.com/v2/collectConsent", formData, cancellationToken);
 			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
 			catch { }
 		}
 
@@ -217,9 +237,9 @@ namespace StockWatcher.Services
 		// Kurs für eine ISIN abrufen (für den periodischen Watchlist-Abruf)
 		// -----------------------------------------------------------------------
 
-		public async Task<QuoteResult> GetQuoteAsync(string isin, string knownSymbol = null)
+		public async Task<QuoteResult> GetQuoteAsync(string isin, string knownSymbol = null, CancellationToken cancellationToken = default(CancellationToken))
 		{
-			await EnsureCrumbAsync();
+			await EnsureCrumbAsync(cancellationToken);
 
 			string isinKey = (isin ?? "").Trim().ToUpperInvariant();
 			if (string.IsNullOrEmpty(isinKey))
@@ -232,14 +252,15 @@ namespace StockWatcher.Services
 				string symbol = knownSymbol.Trim();
 				lock (_symbolCache) { _symbolCache[isinKey] = symbol; }
 
-				QuoteResult known = await FetchPriceAsync(symbol);
+				QuoteResult known = await FetchPriceAsync(symbol, cancellationToken);
 				known.ResolvedSymbol = symbol;
 				if (known.Success) return known;
+				if (known.IsTransientFailure) return known;
 
 				// Nur bei genau einem exakten ISIN-Listing darf ein ungültig gewordenes
 				// Symbol automatisch ersetzt werden. Bei Mehrdeutigkeit muss der Nutzer
 				// im Edit-Dialog über "Prüfen" auswählen.
-				IsinCandidatesResult retry = await LookupIsinCandidatesAsync(isinKey);
+				IsinCandidatesResult retry = await LookupIsinCandidatesAsync(isinKey, cancellationToken);
 				if (retry.Candidates.Count == 1)
 				{
 					IsinListingCandidate candidate = retry.Candidates[0];
@@ -247,7 +268,7 @@ namespace StockWatcher.Services
 					{
 						QuoteResult fresh = candidate.PriceAvailable
 							? QuoteFromCandidate(candidate)
-							: await FetchPriceAsync(candidate.YahooSymbol);
+							: await FetchPriceAsync(candidate.YahooSymbol, cancellationToken);
 						if (fresh.Success)
 						{
 							lock (_symbolCache) { _symbolCache[isinKey] = candidate.YahooSymbol; }
@@ -264,7 +285,7 @@ namespace StockWatcher.Services
 
 			// Noch kein Symbol gespeichert: nur bei exakt einem Kandidaten automatisch
 			// übernehmen. Mehrdeutige Fälle werden bewusst nicht geraten.
-			IsinCandidatesResult lookup = await LookupIsinCandidatesAsync(isinKey);
+			IsinCandidatesResult lookup = await LookupIsinCandidatesAsync(isinKey, cancellationToken);
 			if (lookup.Candidates.Count == 0)
 				return new QuoteResult { Success = false, ErrorMessage = lookup.ErrorMessage };
 			if (lookup.Candidates.Count > 1)
@@ -279,7 +300,7 @@ namespace StockWatcher.Services
 
 			QuoteResult result = single.PriceAvailable
 				? QuoteFromCandidate(single)
-				: await FetchPriceAsync(single.YahooSymbol);
+				: await FetchPriceAsync(single.YahooSymbol, cancellationToken);
 			result.ResolvedSymbol = single.YahooSymbol;
 			return result;
 		}
@@ -330,7 +351,7 @@ namespace StockWatcher.Services
 		// Wechselkurs {fromCurrency} → EUR
 		// -----------------------------------------------------------------------
 
-		public async Task<double> GetFxToEurAsync(string fromCurrency)
+		public async Task<double> GetFxToEurAsync(string fromCurrency, CancellationToken cancellationToken = default(CancellationToken))
 		{
 			if (string.IsNullOrWhiteSpace(fromCurrency)) return 0;
 			fromCurrency = fromCurrency.Trim().ToUpperInvariant();
@@ -343,8 +364,8 @@ namespace StockWatcher.Services
 					return cached.rate;
 			}
 
-			await EnsureCrumbAsync();
-			QuoteResult q = await FetchPriceAsync($"{fromCurrency}EUR=X");
+			await EnsureCrumbAsync(cancellationToken);
+			QuoteResult q = await FetchPriceAsync($"{fromCurrency}EUR=X", cancellationToken);
 
 			if (q.Success && q.Price > 0)
 			{
@@ -403,7 +424,7 @@ namespace StockWatcher.Services
 		// Nur Listings mit bekannter Yahoo-Abbildung werden als Kandidaten angeboten.
 		// -----------------------------------------------------------------------
 
-		public async Task<IsinCandidatesResult> LookupIsinCandidatesAsync(string isin)
+		public async Task<IsinCandidatesResult> LookupIsinCandidatesAsync(string isin, CancellationToken cancellationToken = default(CancellationToken))
 		{
 			var result = new IsinCandidatesResult();
 			if (string.IsNullOrWhiteSpace(isin))
@@ -413,9 +434,9 @@ namespace StockWatcher.Services
 			}
 
 			isin = isin.Trim().ToUpperInvariant();
-			await EnsureCrumbAsync();
+			await EnsureCrumbAsync(cancellationToken);
 
-			List<IsinListingCandidate> candidates = await FigiCandidatesAsync(isin);
+			List<IsinListingCandidate> candidates = await FigiCandidatesAsync(isin, cancellationToken);
 			if (candidates.Count == 0)
 			{
 				result.ErrorMessage = "Keine auf Yahoo Finance abbildbaren Listings für diese ISIN gefunden";
@@ -429,7 +450,7 @@ namespace StockWatcher.Services
 				var tasks = new List<Task>();
 				foreach (IsinListingCandidate candidate in candidates)
 				{
-					tasks.Add(FillCandidateQuoteAsync(candidate, gate));
+					tasks.Add(FillCandidateQuoteAsync(candidate, gate, cancellationToken));
 				}
 				await Task.WhenAll(tasks);
 			}
@@ -447,12 +468,12 @@ namespace StockWatcher.Services
 			return result;
 		}
 
-		private async Task FillCandidateQuoteAsync(IsinListingCandidate candidate, SemaphoreSlim gate)
+		private async Task FillCandidateQuoteAsync(IsinListingCandidate candidate, SemaphoreSlim gate, CancellationToken cancellationToken)
 		{
-			await gate.WaitAsync();
+			await gate.WaitAsync(cancellationToken);
 			try
 			{
-				QuoteResult q = await FetchPriceAsync(candidate.YahooSymbol);
+				QuoteResult q = await FetchPriceAsync(candidate.YahooSymbol, cancellationToken);
 				if (!q.Success) return;
 
 				candidate.PriceAvailable = true;
@@ -460,6 +481,7 @@ namespace StockWatcher.Services
 				candidate.Currency = q.Currency;
 				candidate.Timestamp = q.Timestamp;
 			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
 			catch { }
 			finally
 			{
@@ -467,7 +489,7 @@ namespace StockWatcher.Services
 			}
 		}
 
-		private async Task<List<IsinListingCandidate>> FigiCandidatesAsync(string isin)
+		private async Task<List<IsinListingCandidate>> FigiCandidatesAsync(string isin, CancellationToken cancellationToken)
 		{
 			var candidates = new Dictionary<string, IsinListingCandidate>(StringComparer.OrdinalIgnoreCase);
 			try
@@ -475,7 +497,7 @@ namespace StockWatcher.Services
 				string body = $"[{{\"idType\":\"ID_ISIN\",\"idValue\":\"{isin}\"}}]";
 				var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
 
-				HttpResponseMessage resp = await _http.PostAsync("https://api.openfigi.com/v3/mapping", content);
+				HttpResponseMessage resp = await _http.PostAsync("https://api.openfigi.com/v3/mapping", content, cancellationToken);
 				if (!resp.IsSuccessStatusCode) return new List<IsinListingCandidate>();
 
 				string json = await resp.Content.ReadAsStringAsync();
@@ -509,6 +531,7 @@ namespace StockWatcher.Services
 					}
 				}
 			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
 			catch { }
 
 			return new List<IsinListingCandidate>(candidates.Values);
@@ -594,16 +617,41 @@ namespace StockWatcher.Services
 		// Kursabruf: Yahoo primär, Stooq als Fallback
 		// -----------------------------------------------------------------------
 
-		private async Task<QuoteResult> FetchPriceAsync(string symbol)
+		private async Task<QuoteResult> FetchPriceAsync(
+			string symbol,
+			CancellationToken cancellationToken = default(CancellationToken))
 		{
-			QuoteResult yahoo = NormalizeQuoteUnits(await FetchPriceYahooAsync(symbol));
+			QuoteResult yahoo = NormalizeQuoteUnits(
+				await FetchPriceYahooAsync(symbol, cancellationToken));
 			if (yahoo.Success) return yahoo;
 
 			// Stooq-Fallback (nicht für FX-Ticker wie CHFEUR=X)
 			if (!symbol.Contains("="))
 			{
-				QuoteResult stooq = NormalizeQuoteUnits(await FetchPriceStooqAsync(symbol));
+				QuoteResult stooq = NormalizeQuoteUnits(
+					await FetchPriceStooqAsync(symbol, cancellationToken));
 				if (stooq.Success) return stooq;
+
+				// Bei Netzwerk-/Providerfehlern darf der Aufrufer nicht annehmen,
+				// das gespeicherte Symbol sei ungültig und deshalb OpenFIGI starten.
+				if (yahoo.IsTransientFailure || stooq.IsTransientFailure)
+				{
+					_crumb = null;
+					_crumbAttempted = false;
+					QuoteResult transient = yahoo.IsTransientFailure ? yahoo : stooq;
+					return new QuoteResult
+					{
+						Success = false,
+						IsTransientFailure = true,
+						ErrorMessage = transient.ErrorMessage
+					};
+				}
+			}
+
+			if (yahoo.IsTransientFailure)
+			{
+				_crumb = null;
+				_crumbAttempted = false;
 			}
 
 			return yahoo;
@@ -631,7 +679,7 @@ namespace StockWatcher.Services
 			return quote;
 		}
 
-		private async Task<QuoteResult> FetchPriceYahooAsync(string symbol)
+		private async Task<QuoteResult> FetchPriceYahooAsync(string symbol, CancellationToken cancellationToken)
 		{
 			try
 			{
@@ -639,28 +687,69 @@ namespace StockWatcher.Services
 				             $"{Uri.EscapeDataString(symbol)}" +
 				             $"?interval=1d&range=1d{CrumbParam}";
 
-				string json = await _http.GetStringAsync(url);
-				JObject root = JObject.Parse(json);
+				using (HttpResponseMessage response = await _http.GetAsync(url, cancellationToken))
+				{
+					if (!response.IsSuccessStatusCode)
+					{
+						int status = (int)response.StatusCode;
+						return new QuoteResult
+						{
+							Success = false,
+							IsTransientFailure = IsTransientHttpStatus(status),
+							ErrorMessage = $"Yahoo: HTTP {status}"
+						};
+					}
 
-				JArray results = root["chart"]?["result"] as JArray;
-				if (results == null || results.Count == 0)
-					return new QuoteResult { Success = false, ErrorMessage = "Yahoo: Keine Daten" };
+					string json = await response.Content.ReadAsStringAsync();
+					JObject root = JObject.Parse(json);
 
-				JToken meta  = results[0]["meta"];
-				double price = meta?["regularMarketPrice"]?.Value<double>() ?? 0;
-				string ccy   = (string)meta?["currency"] ?? "";
-				DateTime ts  = DateTime.Now;
-				long? tsRaw  = meta?["regularMarketTime"]?.Value<long?>();
-				if (tsRaw.HasValue) ts = DateTimeOffset.FromUnixTimeSeconds(tsRaw.Value).LocalDateTime;
+					JArray results = root["chart"]?["result"] as JArray;
+					if (results == null || results.Count == 0)
+						return new QuoteResult { Success = false, ErrorMessage = "Yahoo: Keine Daten" };
 
-				if (price <= 0)
-					return new QuoteResult { Success = false, ErrorMessage = "Yahoo: Kein Kurs verfügbar" };
+					JToken meta  = results[0]["meta"];
+					double price = meta?["regularMarketPrice"]?.Value<double>() ?? 0;
+					string ccy   = (string)meta?["currency"] ?? "";
+					DateTime ts  = DateTime.Now;
+					long? tsRaw  = meta?["regularMarketTime"]?.Value<long?>();
+					if (tsRaw.HasValue) ts = DateTimeOffset.FromUnixTimeSeconds(tsRaw.Value).LocalDateTime;
 
-				return new QuoteResult { Success = true, Price = price, Currency = ccy, Timestamp = ts };
+					if (price <= 0)
+						return new QuoteResult { Success = false, ErrorMessage = "Yahoo: Kein Kurs verfügbar" };
+
+					return new QuoteResult { Success = true, Price = price, Currency = ccy, Timestamp = ts };
+				}
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				throw;
+			}
+			catch (TaskCanceledException)
+			{
+				return new QuoteResult
+				{
+					Success = false,
+					IsTransientFailure = true,
+					ErrorMessage = "Yahoo: Timeout"
+				};
+			}
+			catch (HttpRequestException ex)
+			{
+				return new QuoteResult
+				{
+					Success = false,
+					IsTransientFailure = true,
+					ErrorMessage = $"Yahoo: Netzwerkfehler ({ex.Message})"
+				};
 			}
 			catch (Exception ex)
 			{
-				return new QuoteResult { Success = false, ErrorMessage = $"Yahoo: {ex.Message}" };
+				return new QuoteResult
+				{
+					Success = false,
+					IsTransientFailure = true,
+					ErrorMessage = $"Yahoo: Providerfehler ({ex.Message})"
+				};
 			}
 		}
 
@@ -668,43 +757,90 @@ namespace StockWatcher.Services
 		/// Stooq-Fallback: liefert Close-Preis via CSV.
 		/// URL: https://stooq.com/q/l/?s={symbol_lower}&amp;f=sd2t2ohlcv&amp;h&amp;e=csv
 		/// </summary>
-		private async Task<QuoteResult> FetchPriceStooqAsync(string symbol)
+		private async Task<QuoteResult> FetchPriceStooqAsync(string symbol, CancellationToken cancellationToken)
 		{
 			try
 			{
 				string url = $"https://stooq.com/q/l/?s={Uri.EscapeDataString(symbol.ToLowerInvariant())}" +
 				             $"&f=sd2t2ohlcv&h&e=csv";
 
-				string csv = await _http.GetStringAsync(url);
-				string[] lines = csv.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+				using (HttpResponseMessage response = await _http.GetAsync(url, cancellationToken))
+				{
+					if (!response.IsSuccessStatusCode)
+					{
+						int status = (int)response.StatusCode;
+						return new QuoteResult
+						{
+							Success = false,
+							IsTransientFailure = IsTransientHttpStatus(status),
+							ErrorMessage = $"Stooq: HTTP {status}"
+						};
+					}
 
-				if (lines.Length < 2)
-					return new QuoteResult { Success = false, ErrorMessage = "Stooq: Keine Daten" };
+					string csv = await response.Content.ReadAsStringAsync();
+					string[] lines = csv.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
 
-				string[] parts = lines[1].Split(',');
-				// Format: Symbol,Date,Time,Open,High,Low,Close,Volume
-				if (parts.Length < 7)
-					return new QuoteResult { Success = false, ErrorMessage = "Stooq: Ungültiges Format" };
+					if (lines.Length < 2)
+						return new QuoteResult { Success = false, ErrorMessage = "Stooq: Keine Daten" };
 
-				string closeRaw = parts[6].Trim();
-				if (!double.TryParse(closeRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out double close)
-				    || close <= 0)
-					return new QuoteResult { Success = false, ErrorMessage = "Stooq: Kein gültiger Kurs (N/D?)" };
+					string[] parts = lines[1].Split(',');
+					// Format: Symbol,Date,Time,Open,High,Low,Close,Volume
+					if (parts.Length < 7)
+						return new QuoteResult { Success = false, ErrorMessage = "Stooq: Ungültiges Format" };
 
-				string ccy = CurrencyFromSuffix(symbol);
-				DateTime ts = DateTime.Now;
-				if (parts.Length >= 8 &&
-				    DateTime.TryParseExact($"{parts[1].Trim()} {parts[2].Trim()}",
-				        "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
-				        DateTimeStyles.None, out DateTime stooqTs))
-					ts = stooqTs;
+					string closeRaw = parts[6].Trim();
+					if (!double.TryParse(closeRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out double close)
+					    || close <= 0)
+						return new QuoteResult { Success = false, ErrorMessage = "Stooq: Kein gültiger Kurs (N/D?)" };
 
-				return new QuoteResult { Success = true, Price = close, Currency = ccy, Timestamp = ts };
+					string ccy = CurrencyFromSuffix(symbol);
+					DateTime ts = DateTime.Now;
+					if (parts.Length >= 8 &&
+					    DateTime.TryParseExact($"{parts[1].Trim()} {parts[2].Trim()}",
+					        "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
+					        DateTimeStyles.None, out DateTime stooqTs))
+						ts = stooqTs;
+
+					return new QuoteResult { Success = true, Price = close, Currency = ccy, Timestamp = ts };
+				}
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				throw;
+			}
+			catch (TaskCanceledException)
+			{
+				return new QuoteResult
+				{
+					Success = false,
+					IsTransientFailure = true,
+					ErrorMessage = "Stooq: Timeout"
+				};
+			}
+			catch (HttpRequestException ex)
+			{
+				return new QuoteResult
+				{
+					Success = false,
+					IsTransientFailure = true,
+					ErrorMessage = $"Stooq: Netzwerkfehler ({ex.Message})"
+				};
 			}
 			catch (Exception ex)
 			{
-				return new QuoteResult { Success = false, ErrorMessage = $"Stooq: {ex.Message}" };
+				return new QuoteResult
+				{
+					Success = false,
+					IsTransientFailure = true,
+					ErrorMessage = $"Stooq: Providerfehler ({ex.Message})"
+				};
 			}
+		}
+
+		private static bool IsTransientHttpStatus(int status)
+		{
+			return status == 401 || status == 403 || status == 408 || status == 425 ||
+			       status == 429 || status >= 500;
 		}
 
 		private static string CurrencyFromSuffix(string symbol)

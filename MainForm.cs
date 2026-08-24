@@ -8,6 +8,7 @@ using System.IO;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using StockWatcher.Forms;
@@ -55,6 +56,8 @@ namespace StockWatcher
 		private readonly StockFrankfurtClient _client;
 		private bool _fetchRunning = false;
 		private DateTime _nextFetchTime = DateTime.MinValue;
+		private static readonly TimeSpan EntryFetchTimeout = TimeSpan.FromSeconds(30);
+		private static readonly TimeSpan ConnectivityRetryInterval = TimeSpan.FromMinutes(1);
 		private bool _restoringLayout = false;
 		private bool _allowMainWindowVisible = true;
 		private double? _previousPortfolioMarketValueEur = null;
@@ -770,8 +773,14 @@ namespace StockWatcher
 
 		private void ApplyInterval()
 		{
+			ScheduleNextFetch(TimeSpan.FromMinutes(_settings.IntervalMinutes));
+		}
+
+		private void ScheduleNextFetch(TimeSpan delay)
+		{
 			_timer.Stop();
-			_timer.Interval = _settings.IntervalMinutes * 60 * 1000;
+			double milliseconds = Math.Max(1000.0, Math.Min(int.MaxValue, delay.TotalMilliseconds));
+			_timer.Interval = (int)milliseconds;
 			_nextFetchTime = DateTime.Now.AddMilliseconds(_timer.Interval);
 			_timer.Start();
 		}
@@ -788,40 +797,101 @@ namespace StockWatcher
 		// Kursabruf
 		// -----------------------------------------------------------------------
 
+		private enum FetchEntryOutcome
+		{
+			Completed,
+			Failed,
+			TransientFailure,
+			TimedOut
+		}
+
 		private async Task FetchAllQuotesAsync()
 		{
 			if (_fetchRunning) return;
+
 			_fetchRunning = true;
+			_timer.Stop();
+			_nextFetchTime = DateTime.MinValue;
+			_lblNextUpdate.Text = "Nächster Abruf: –";
 			_lblStatus.Text = "Abruf läuft…";
-			_nextFetchTime = DateTime.Now.AddMilliseconds(_timer.Interval);
 
-			var fetchEntries = new List<WatchlistEntry>(_settings.Watchlist);
+			bool retrySoon = false;
 
-			for (int i = 0; i < fetchEntries.Count; i++)
+			try
 			{
-				WatchlistEntry entry = fetchEntries[i];
-				_lblStatus.Text = $"Abruf {i + 1}/{fetchEntries.Count}: {entry.Name}…";
-				await FetchQuoteIntoEntry(entry);
-			}
+				var fetchEntries = new List<WatchlistEntry>(_settings.Watchlist);
 
-			_settings.Save();
-			RefreshListView(updatePortfolioTrend: true);
-			_lblStatus.Text = $"Zuletzt aktualisiert: {DateTime.Now:HH:mm:ss}";
-			_fetchRunning = false;
+				for (int i = 0; i < fetchEntries.Count; i++)
+				{
+					WatchlistEntry entry = fetchEntries[i];
+					_lblStatus.Text = $"Abruf {i + 1}/{fetchEntries.Count}: {entry.Name}…";
+
+					FetchEntryOutcome outcome;
+					using (var cts = new CancellationTokenSource(EntryFetchTimeout))
+					{
+						outcome = await FetchQuoteIntoEntry(entry, cts.Token);
+					}
+
+					if (outcome == FetchEntryOutcome.TransientFailure ||
+						outcome == FetchEntryOutcome.TimedOut)
+					{
+						retrySoon = true;
+						string reason = outcome == FetchEntryOutcome.TimedOut
+							? "Timeout beim Datenabruf"
+							: "Netzwerk/Yahoo nicht erreichbar";
+						_lblStatus.Text = $"Abruf abgebrochen: {reason} – neuer Versuch in 1 Min.";
+						break;
+					}
+				}
+
+				try { _settings.Save(); }
+				catch (Exception ex)
+				{
+					_lblStatus.Text = $"Fehler beim Speichern: {ex.Message}";
+				}
+
+				RefreshListView(updatePortfolioTrend: !retrySoon);
+				if (!retrySoon)
+					_lblStatus.Text = $"Zuletzt aktualisiert: {DateTime.Now:HH:mm:ss}";
+			}
+			catch (Exception ex)
+			{
+				retrySoon = true;
+				_lblStatus.Text = $"Abruf abgebrochen: {ex.Message} – neuer Versuch in 1 Min.";
+			}
+			finally
+			{
+				_fetchRunning = false;
+				ScheduleNextFetch(retrySoon
+					? ConnectivityRetryInterval
+					: TimeSpan.FromMinutes(_settings.IntervalMinutes));
+			}
 		}
 
 		private async Task FetchSingleAsync(WatchlistEntry entry)
 		{
-			await FetchQuoteIntoEntry(entry);
-			_settings.Save();
-			RefreshListView();
+			try
+			{
+				using (var cts = new CancellationTokenSource(EntryFetchTimeout))
+				{
+					await FetchQuoteIntoEntry(entry, cts.Token);
+				}
+
+				_settings.Save();
+				RefreshListView();
+			}
+			catch (Exception ex)
+			{
+				entry.StatusText = $"Fehler beim Abruf [{ex.Message}]";
+				RefreshListView();
+			}
 		}
 
 		// Nach dieser Anzahl Fehlschlägen wird der Lookup-Rhythmus auf 1h gedrosselt
 		private const int LookupMaxFails = 3;
 		private static readonly TimeSpan LookupRetryInterval = TimeSpan.FromHours(1);
 
-		private async Task FetchQuoteIntoEntry(WatchlistEntry entry)
+		private async Task<FetchEntryOutcome> FetchQuoteIntoEntry(WatchlistEntry entry, CancellationToken cancellationToken)
 		{
 			// Gedrosselter Eintrag: Symbol unbekannt und Wartezeit noch nicht abgelaufen
 			if (string.IsNullOrEmpty(entry.YahooSymbol) &&
@@ -830,10 +900,20 @@ namespace StockWatcher
 			{
 				TimeSpan wait = entry.NextLookupAttempt - DateTime.Now;
 				entry.StatusText = $"Symbol unbekannt – nächster Versuch in {(int)wait.TotalMinutes} Min.";
-				return;
+				return FetchEntryOutcome.Failed;
 			}
 
-			QuoteResult result = await _client.GetQuoteAsync(entry.Isin, entry.YahooSymbol);
+			QuoteResult result;
+			try
+			{
+				result = await _client.GetQuoteAsync(entry.Isin, entry.YahooSymbol, cancellationToken);
+			}
+			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+			{
+				MarkRetrievalFailure(entry);
+				entry.StatusText = "Timeout beim Datenabruf";
+				return FetchEntryOutcome.TimedOut;
+			}
 			if (result.Success)
 			{
 				double previousDisplayedPrice = GetDisplayedPriceForTrend(entry);
@@ -886,7 +966,18 @@ namespace StockWatcher
 				}
 				else
 				{
-					double rate = await _client.GetFxToEurAsync(quoteCurrency);
+					double rate;
+					try
+					{
+						rate = await _client.GetFxToEurAsync(quoteCurrency, cancellationToken);
+					}
+					catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+					{
+						MarkRetrievalFailure(entry);
+						entry.StatusText = "Timeout beim Datenabruf";
+						return FetchEntryOutcome.TimedOut;
+					}
+
 					if (rate > 0)
 					{
 						entry.FxRate = rate;
@@ -912,17 +1003,33 @@ namespace StockWatcher
 				if (persistChanged)
 					_settings.Save();
 
-				await CheckLimitsAsync(entry);
+				try
+				{
+					await CheckLimitsAsync(entry, cancellationToken);
+				}
+				catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+				{
+					MarkRetrievalFailure(entry);
+					entry.StatusText = "Timeout beim Datenabruf";
+					return FetchEntryOutcome.TimedOut;
+				}
+
+				return FetchEntryOutcome.Completed;
 			}
 			else
 			{
-				entry.QuoteFetchAttemptedThisSession = true;
-				if (entry.DataRetrievalFailureSince == DateTime.MinValue)
-					entry.DataRetrievalFailureSince = DateTime.Now;
+				MarkRetrievalFailure(entry);
 
-				entry.LookupFailCount++;
 				string errDetail = !string.IsNullOrEmpty(result.ErrorMessage)
 					? $" [{result.ErrorMessage}]" : "";
+
+				if (result.IsTransientFailure)
+				{
+					entry.StatusText = $"Netzwerk/Yahoo nicht erreichbar{errDetail}";
+					return FetchEntryOutcome.TransientFailure;
+				}
+
+				entry.LookupFailCount++;
 				if (entry.LookupFailCount >= LookupMaxFails)
 				{
 					entry.NextLookupAttempt = DateTime.Now.Add(LookupRetryInterval);
@@ -932,7 +1039,16 @@ namespace StockWatcher
 				{
 					entry.StatusText = $"Nicht gefunden ({entry.LookupFailCount}/{LookupMaxFails}){errDetail}";
 				}
+
+				return FetchEntryOutcome.Failed;
 			}
+		}
+
+		private static void MarkRetrievalFailure(WatchlistEntry entry)
+		{
+			entry.QuoteFetchAttemptedThisSession = true;
+			if (entry.DataRetrievalFailureSince == DateTime.MinValue)
+				entry.DataRetrievalFailureSince = DateTime.Now;
 		}
 
 		// -----------------------------------------------------------------------
@@ -1030,7 +1146,7 @@ namespace StockWatcher
 			public string Currency { get; set; } = "";
 		}
 
-		private async Task CheckLimitsAsync(WatchlistEntry entry)
+		private async Task CheckLimitsAsync(WatchlistEntry entry, CancellationToken cancellationToken)
 		{
 			if (entry.EntryType == WatchlistEntryType.Realized) return;
 
@@ -1041,7 +1157,7 @@ namespace StockWatcher
 			double currentReferencePrice = 0.0;
 			string referenceCurrency = entry.EffectiveReferenceCurrency;
 			if (needsReferencePrice && entry.ReferencePrice > 0)
-				currentReferencePrice = await GetCurrentPriceInCurrencyAsync(entry, referenceCurrency);
+				currentReferencePrice = await GetCurrentPriceInCurrencyAsync(entry, referenceCurrency, cancellationToken);
 
 			LimitEvaluation upper = EvaluateLimit(entry, true, currentReferencePrice, referenceCurrency);
 			LimitEvaluation lower = EvaluateLimit(entry, false, currentReferencePrice, referenceCurrency);
@@ -1123,7 +1239,7 @@ namespace StockWatcher
 			};
 		}
 
-		private async Task<double> GetCurrentPriceInCurrencyAsync(WatchlistEntry entry, string targetCurrency)
+		private async Task<double> GetCurrentPriceInCurrencyAsync(WatchlistEntry entry, string targetCurrency, CancellationToken cancellationToken)
 		{
 			if (entry.LastPrice <= 0 || string.IsNullOrWhiteSpace(targetCurrency)) return 0.0;
 
@@ -1139,7 +1255,7 @@ namespace StockWatcher
 
 			if (entry.LastPriceEur <= 0) return 0.0;
 
-			double targetToEur = await _client.GetFxToEurAsync(targetCurrency);
+			double targetToEur = await _client.GetFxToEurAsync(targetCurrency, cancellationToken);
 			if (targetToEur <= 0) return 0.0;
 
 			return entry.LastPriceEur / targetToEur;
