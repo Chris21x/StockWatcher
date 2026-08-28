@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
@@ -7,6 +7,8 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
+
+using StockWatcher.Localization;
 
 namespace StockWatcher.Services
 {
@@ -243,7 +245,7 @@ namespace StockWatcher.Services
 
 			string isinKey = (isin ?? "").Trim().ToUpperInvariant();
 			if (string.IsNullOrEmpty(isinKey))
-				return new QuoteResult { Success = false, ErrorMessage = "ISIN fehlt" };
+				return new QuoteResult { Success = false, ErrorMessage = L10n.Text("ServiceIsinMissing") };
 
 			// Ein vom Nutzer gewähltes/persistiertes Symbol wird nie ungefragt ersetzt,
 			// solange es einen Kurs liefert.
@@ -279,7 +281,7 @@ namespace StockWatcher.Services
 				}
 
 				if (retry.Candidates.Count > 1)
-					known.ErrorMessage = "Gespeichertes Symbol ohne Kurs; mehrere Listings gefunden – bitte im Eintrag 'Prüfen' und auswählen";
+					known.ErrorMessage = L10n.Text("ServiceStoredSymbolNoQuote");
 				return known;
 			}
 
@@ -292,7 +294,7 @@ namespace StockWatcher.Services
 				return new QuoteResult
 				{
 					Success = false,
-					ErrorMessage = "Mehrere Listings gefunden – bitte Eintrag bearbeiten, 'Prüfen' und Handelsplatz auswählen"
+					ErrorMessage = L10n.Text("ServiceMultipleListings")
 				};
 
 			IsinListingCandidate single = lookup.Candidates[0];
@@ -314,7 +316,7 @@ namespace StockWatcher.Services
 				Currency = candidate.Currency ?? "",
 				Timestamp = candidate.Timestamp,
 				ResolvedSymbol = candidate.YahooSymbol ?? "",
-				ErrorMessage = candidate.PriceAvailable ? "" : "Kurs nicht verfügbar"
+				ErrorMessage = candidate.PriceAvailable ? "" : L10n.Text("ServiceQuoteUnavailable")
 			};
 		}
 
@@ -328,7 +330,7 @@ namespace StockWatcher.Services
 			if (lookup.Candidates.Count != 1)
 			{
 				string error = lookup.Candidates.Count > 1
-					? "Mehrere Listings gefunden – Auswahl erforderlich"
+					? L10n.Text("ServiceMultipleListings")
 					: lookup.ErrorMessage;
 				return new IsinLookupResult { Found = false, ErrorMessage = error ?? "" };
 			}
@@ -343,7 +345,7 @@ namespace StockWatcher.Services
 				Name         = candidate.Name,
 				LastPrice    = candidate.PriceAvailable ? candidate.LastPrice : 0,
 				Currency     = candidate.PriceAvailable ? candidate.Currency : "",
-				ErrorMessage = candidate.PriceAvailable ? "" : "Kurs nicht verfügbar"
+				ErrorMessage = candidate.PriceAvailable ? "" : L10n.Text("ServiceQuoteUnavailable")
 			};
 		}
 
@@ -429,7 +431,7 @@ namespace StockWatcher.Services
 			var result = new IsinCandidatesResult();
 			if (string.IsNullOrWhiteSpace(isin))
 			{
-				result.ErrorMessage = "ISIN fehlt";
+				result.ErrorMessage = L10n.Text("ServiceIsinMissing");
 				return result;
 			}
 
@@ -439,7 +441,7 @@ namespace StockWatcher.Services
 			List<IsinListingCandidate> candidates = await FigiCandidatesAsync(isin, cancellationToken);
 			if (candidates.Count == 0)
 			{
-				result.ErrorMessage = "Keine auf Yahoo Finance abbildbaren Listings für diese ISIN gefunden";
+				result.ErrorMessage = L10n.Text("ServiceNoYahooListings");
 				return result;
 			}
 
@@ -565,48 +567,48 @@ namespace StockWatcher.Services
 			switch (exchCode)
 			{
 				// Deutschland
-				case "GY": case "GT": case "GQ": return new ExchangeInfo(".DE", "Deutschland", "Xetra");
-				case "GF": return new ExchangeInfo(".F",  "Deutschland", "Frankfurt");
-				case "GM": return new ExchangeInfo(".MU", "Deutschland", "München");
-				case "GS": return new ExchangeInfo(".SG", "Deutschland", "Stuttgart");
-				case "GB": return new ExchangeInfo(".BE", "Deutschland", "Berlin");
-				case "GH": return new ExchangeInfo(".HM", "Deutschland", "Hamburg");
-				case "GI": return new ExchangeInfo(".HA", "Deutschland", "Hannover");
-				case "GD": return new ExchangeInfo(".DU", "Deutschland", "Düsseldorf");
+				case "GY": case "GT": case "GQ": return new ExchangeInfo(".DE", L10n.Text("CountryGermany"), "Xetra");
+				case "GF": return new ExchangeInfo(".F",  L10n.Text("CountryGermany"), "Frankfurt");
+				case "GM": return new ExchangeInfo(".MU", L10n.Text("CountryGermany"), "München");
+				case "GS": return new ExchangeInfo(".SG", L10n.Text("CountryGermany"), "Stuttgart");
+				case "GB": return new ExchangeInfo(".BE", L10n.Text("CountryGermany"), "Berlin");
+				case "GH": return new ExchangeInfo(".HM", L10n.Text("CountryGermany"), "Hamburg");
+				case "GI": return new ExchangeInfo(".HA", L10n.Text("CountryGermany"), "Hannover");
+				case "GD": return new ExchangeInfo(".DU", L10n.Text("CountryGermany"), "Düsseldorf");
 
 				// Europa
-				case "SE": case "SW": return new ExchangeInfo(".SW", "Schweiz", "SIX Swiss Exchange");
-				case "FP": return new ExchangeInfo(".PA", "Frankreich", "Euronext Paris");
-				case "NA": return new ExchangeInfo(".AS", "Niederlande", "Euronext Amsterdam");
-				case "LN": case "LC": case "LT": return new ExchangeInfo(".L", "Vereinigtes Königreich", "London Stock Exchange");
-				case "IM": return new ExchangeInfo(".MI", "Italien", "Borsa Italiana");
-				case "SM": return new ExchangeInfo(".MC", "Spanien", "Bolsa de Madrid");
-				case "DC": return new ExchangeInfo(".CO", "Dänemark", "Nasdaq Copenhagen");
-				case "SS": return new ExchangeInfo(".ST", "Schweden", "Nasdaq Stockholm");
-				case "NO": return new ExchangeInfo(".OL", "Norwegen", "Oslo Børs");
-				case "FH": return new ExchangeInfo(".HE", "Finnland", "Nasdaq Helsinki");
-				case "BB": return new ExchangeInfo(".BR", "Belgien", "Euronext Brussels");
-				case "AV": return new ExchangeInfo(".VI", "Österreich", "Wiener Börse");
-				case "PL": return new ExchangeInfo(".LS", "Portugal", "Euronext Lisbon");
-				case "ID": return new ExchangeInfo(".IR", "Irland", "Euronext Dublin");
-				case "LX": return new ExchangeInfo(".LU", "Luxemburg", "Luxembourg Stock Exchange");
+				case "SE": case "SW": return new ExchangeInfo(".SW", L10n.Text("CountrySwitzerland"), "SIX Swiss Exchange");
+				case "FP": return new ExchangeInfo(".PA", L10n.Text("CountryFrance"), "Euronext Paris");
+				case "NA": return new ExchangeInfo(".AS", L10n.Text("CountryNetherlands"), "Euronext Amsterdam");
+				case "LN": case "LC": case "LT": return new ExchangeInfo(".L", L10n.Text("CountryUnitedKingdom"), "London Stock Exchange");
+				case "IM": return new ExchangeInfo(".MI", L10n.Text("CountryItaly"), "Borsa Italiana");
+				case "SM": return new ExchangeInfo(".MC", L10n.Text("CountrySpain"), "Bolsa de Madrid");
+				case "DC": return new ExchangeInfo(".CO", L10n.Text("CountryDenmark"), "Nasdaq Copenhagen");
+				case "SS": return new ExchangeInfo(".ST", L10n.Text("CountrySweden"), "Nasdaq Stockholm");
+				case "NO": return new ExchangeInfo(".OL", L10n.Text("CountryNorway"), "Oslo Børs");
+				case "FH": return new ExchangeInfo(".HE", L10n.Text("CountryFinland"), "Nasdaq Helsinki");
+				case "BB": return new ExchangeInfo(".BR", L10n.Text("CountryBelgium"), "Euronext Brussels");
+				case "AV": return new ExchangeInfo(".VI", L10n.Text("CountryAustria"), "Wiener Börse");
+				case "PL": return new ExchangeInfo(".LS", L10n.Text("CountryPortugal"), "Euronext Lisbon");
+				case "ID": return new ExchangeInfo(".IR", L10n.Text("CountryIreland"), "Euronext Dublin");
+				case "LX": return new ExchangeInfo(".LU", L10n.Text("CountryLuxembourg"), "Luxembourg Stock Exchange");
 
 				// Asien/Pazifik
-				case "HK": return new ExchangeInfo(".HK", "Hongkong", "Hong Kong Stock Exchange");
-				case "JP": case "JT": return new ExchangeInfo(".T", "Japan", "Tokyo Stock Exchange");
-				case "AN": case "AT": return new ExchangeInfo(".AX", "Australien", "Australian Securities Exchange");
-				case "SP": return new ExchangeInfo(".SI", "Singapur", "Singapore Exchange");
-				case "NZ": return new ExchangeInfo(".NZ", "Neuseeland", "New Zealand Exchange");
+				case "HK": return new ExchangeInfo(".HK", L10n.Text("CountryHongKong"), "Hong Kong Stock Exchange");
+				case "JP": case "JT": return new ExchangeInfo(".T", L10n.Text("CountryJapan"), "Tokyo Stock Exchange");
+				case "AN": case "AT": return new ExchangeInfo(".AX", L10n.Text("CountryAustralia"), "Australian Securities Exchange");
+				case "SP": return new ExchangeInfo(".SI", L10n.Text("CountrySingapore"), "Singapore Exchange");
+				case "NZ": return new ExchangeInfo(".NZ", L10n.Text("CountryNewZealand"), "New Zealand Exchange");
 
 				// Kanada
-				case "CT": case "CN": return new ExchangeInfo(".TO", "Kanada", "Toronto Stock Exchange");
-				case "CV": return new ExchangeInfo(".V", "Kanada", "TSX Venture Exchange");
+				case "CT": case "CN": return new ExchangeInfo(".TO", L10n.Text("CountryCanada"), "Toronto Stock Exchange");
+				case "CV": return new ExchangeInfo(".V", L10n.Text("CountryCanada"), "TSX Venture Exchange");
 
 				// USA – Yahoo verwendet für die regulären US-Börsen kein Suffix.
 				case "US": case "UN": case "UA": case "UQ": case "UW": case "UR":
 				case "UP": case "UB": case "UC": case "UF": case "UM": case "VF":
 				case "VG": case "VJ": case "VK": case "VY":
-					return new ExchangeInfo("", "USA", "US-Börse");
+					return new ExchangeInfo("", L10n.Text("CountryUsa"), L10n.Text("ExchangeUs"));
 
 				default:
 					return null;
@@ -705,7 +707,7 @@ namespace StockWatcher.Services
 
 					JArray results = root["chart"]?["result"] as JArray;
 					if (results == null || results.Count == 0)
-						return new QuoteResult { Success = false, ErrorMessage = "Yahoo: Keine Daten" };
+						return new QuoteResult { Success = false, ErrorMessage = L10n.Text("YahooNoData") };
 
 					JToken meta  = results[0]["meta"];
 					double price = meta?["regularMarketPrice"]?.Value<double>() ?? 0;
@@ -715,7 +717,7 @@ namespace StockWatcher.Services
 					if (tsRaw.HasValue) ts = DateTimeOffset.FromUnixTimeSeconds(tsRaw.Value).LocalDateTime;
 
 					if (price <= 0)
-						return new QuoteResult { Success = false, ErrorMessage = "Yahoo: Kein Kurs verfügbar" };
+						return new QuoteResult { Success = false, ErrorMessage = L10n.Text("YahooNoQuote") };
 
 					return new QuoteResult { Success = true, Price = price, Currency = ccy, Timestamp = ts };
 				}
@@ -730,7 +732,7 @@ namespace StockWatcher.Services
 				{
 					Success = false,
 					IsTransientFailure = true,
-					ErrorMessage = "Yahoo: Timeout"
+					ErrorMessage = L10n.Text("YahooTimeout")
 				};
 			}
 			catch (HttpRequestException ex)
@@ -739,7 +741,7 @@ namespace StockWatcher.Services
 				{
 					Success = false,
 					IsTransientFailure = true,
-					ErrorMessage = $"Yahoo: Netzwerkfehler ({ex.Message})"
+					ErrorMessage = L10n.Format("YahooNetworkError", ex.Message)
 				};
 			}
 			catch (Exception ex)
@@ -748,7 +750,7 @@ namespace StockWatcher.Services
 				{
 					Success = false,
 					IsTransientFailure = true,
-					ErrorMessage = $"Yahoo: Providerfehler ({ex.Message})"
+					ErrorMessage = L10n.Format("YahooProviderError", ex.Message)
 				};
 			}
 		}
@@ -781,17 +783,17 @@ namespace StockWatcher.Services
 					string[] lines = csv.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
 
 					if (lines.Length < 2)
-						return new QuoteResult { Success = false, ErrorMessage = "Stooq: Keine Daten" };
+						return new QuoteResult { Success = false, ErrorMessage = L10n.Text("StooqNoData") };
 
 					string[] parts = lines[1].Split(',');
 					// Format: Symbol,Date,Time,Open,High,Low,Close,Volume
 					if (parts.Length < 7)
-						return new QuoteResult { Success = false, ErrorMessage = "Stooq: Ungültiges Format" };
+						return new QuoteResult { Success = false, ErrorMessage = L10n.Text("StooqInvalidFormat") };
 
 					string closeRaw = parts[6].Trim();
 					if (!double.TryParse(closeRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out double close)
 					    || close <= 0)
-						return new QuoteResult { Success = false, ErrorMessage = "Stooq: Kein gültiger Kurs (N/D?)" };
+						return new QuoteResult { Success = false, ErrorMessage = L10n.Text("StooqNoValidQuote") };
 
 					string ccy = CurrencyFromSuffix(symbol);
 					DateTime ts = DateTime.Now;
@@ -814,7 +816,7 @@ namespace StockWatcher.Services
 				{
 					Success = false,
 					IsTransientFailure = true,
-					ErrorMessage = "Stooq: Timeout"
+					ErrorMessage = L10n.Text("StooqTimeout")
 				};
 			}
 			catch (HttpRequestException ex)
@@ -823,7 +825,7 @@ namespace StockWatcher.Services
 				{
 					Success = false,
 					IsTransientFailure = true,
-					ErrorMessage = $"Stooq: Netzwerkfehler ({ex.Message})"
+					ErrorMessage = L10n.Format("StooqNetworkError", ex.Message)
 				};
 			}
 			catch (Exception ex)
@@ -832,7 +834,7 @@ namespace StockWatcher.Services
 				{
 					Success = false,
 					IsTransientFailure = true,
-					ErrorMessage = $"Stooq: Providerfehler ({ex.Message})"
+					ErrorMessage = L10n.Format("StooqProviderError", ex.Message)
 				};
 			}
 		}

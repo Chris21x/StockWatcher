@@ -11,20 +11,22 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using StockWatcher.Controls;
+using StockWatcher.Localization;
 using StockWatcher.Forms;
 using StockWatcher.Models;
 using StockWatcher.Services;
 
 namespace StockWatcher
 {
-	public class MainForm : Form
+	public partial class MainForm : Form
 	{
 		// P/Invoke: Fenster wirklich in den Vordergrund bringen
 		[DllImport("user32.dll")]
 		private static extern bool SetForegroundWindow(IntPtr hWnd);
 
 		// UI-Elemente
-		private ListView _listView;
+		private ColumnSelectableListView _listView;
 		private TabControl _tabControl;
 		private TabPage _tabOverview;
 		private TabPage _tabHolding;
@@ -45,6 +47,9 @@ namespace StockWatcher
 		private NotifyIcon _notifyIcon;
 		private ContextMenuStrip _trayMenu;
 		private ContextMenuStrip _entryContextMenu;
+		private ContextMenuStrip _columnHeaderContextMenu;
+		private Button _btnColumnChooser;
+		private int _columnHeaderContextIndex = -1;
 
 		// Sortierung
 		private readonly ListViewSorter _sorter = new ListViewSorter();
@@ -91,8 +96,6 @@ namespace StockWatcher
 
 			BuildUi();
 			RestoreWindowLayout();
-			RestoreColumnOrder();
-			RestoreColumnWidths();
 			BuildTrayIcon();
 			RefreshListView();
 			StartTimers();
@@ -106,19 +109,19 @@ namespace StockWatcher
 
 		private void BuildUi()
 		{
-			Text = "Stock Watcher";
+			Text = L10n.Text("AppTitle");
 			Size = new Size(1080, 520);
 			StartPosition = FormStartPosition.CenterScreen;
 			MinimumSize = new Size(700, 400);
 
 			// Menü
 			var menuStrip = new MenuStrip();
-			var menuAction = new ToolStripMenuItem("Aktion");
-			var miRefresh = new ToolStripMenuItem("Jetzt abrufen", null, (s, e) => _ = FetchAllQuotesAsync());
+			var menuAction = new ToolStripMenuItem(L10n.Text("MenuAction"));
+			var miRefresh = new ToolStripMenuItem(L10n.Text("MenuRefreshNow"), null, (s, e) => _ = FetchAllQuotesAsync());
 			miRefresh.ShortcutKeys = Keys.F5;
-			var miSettings = new ToolStripMenuItem("Einstellungen…", null, OpenSettings);
+			var miSettings = new ToolStripMenuItem(L10n.Text("MenuSettings"), null, OpenSettings);
 			miSettings.ShortcutKeys = Keys.Control | Keys.E;
-			var miExit = new ToolStripMenuItem("Beenden", null, (s, e) => Application.Exit());
+			var miExit = new ToolStripMenuItem(L10n.Text("MenuExit"), null, (s, e) => Application.Exit());
 			menuAction.DropDownItems.AddRange(new ToolStripItem[]
 				{ miRefresh, miSettings, new ToolStripSeparator(), miExit });
 			menuStrip.Items.Add(menuAction);
@@ -127,31 +130,31 @@ namespace StockWatcher
 			// Toolbar
 			_toolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden };
 
-			var btnRefresh = new ToolStripButton("↻  Abrufen (F5)")
+			var btnRefresh = new ToolStripButton(L10n.Text("ToolbarRefresh"))
 			{
 				DisplayStyle = ToolStripItemDisplayStyle.Text,
-				ToolTipText = "Kurse sofort abrufen"
+				ToolTipText = L10n.Text("TipRefresh")
 			};
 			btnRefresh.Click += (s, e) => _ = FetchAllQuotesAsync();
 
-			var btnAdd = new ToolStripButton("＋  Hinzufügen")
+			var btnAdd = new ToolStripButton(L10n.Text("ToolbarAdd"))
 			{
 				DisplayStyle = ToolStripItemDisplayStyle.Text,
-				ToolTipText = "Neues Wertpapier hinzufügen"
+				ToolTipText = L10n.Text("TipAdd")
 			};
 			btnAdd.Click += BtnAdd_Click;
 
-			var btnEdit = new ToolStripButton("✎  Bearbeiten")
+			var btnEdit = new ToolStripButton(L10n.Text("ToolbarEdit"))
 			{
 				DisplayStyle = ToolStripItemDisplayStyle.Text,
-				ToolTipText = "Ausgewählten Eintrag bearbeiten (oder Doppelklick)"
+				ToolTipText = L10n.Text("TipEdit")
 			};
 			btnEdit.Click += (s, e) => OpenEditDialog();
 
-			var btnRemove = new ToolStripButton("✕  Entfernen")
+			var btnRemove = new ToolStripButton(L10n.Text("ToolbarRemove"))
 			{
 				DisplayStyle = ToolStripItemDisplayStyle.Text,
-				ToolTipText = "Ausgewählten Eintrag entfernen"
+				ToolTipText = L10n.Text("TipRemove")
 			};
 			btnRemove.Click += BtnRemove_Click;
 
@@ -162,7 +165,7 @@ namespace StockWatcher
 			_toolStrip.Items.Add(btnRemove);
 
 			// ListView
-			_listView = new ListView
+			_listView = new ColumnSelectableListView
 			{
 				Dock = DockStyle.Fill,
 				View = View.Details,
@@ -177,7 +180,9 @@ namespace StockWatcher
 			_listView.DoubleClick += (s, e) => OpenEditDialog();
 			_listView.ColumnClick += ListView_ColumnClick;
 			_listView.MouseDown += ListView_MouseDown;
+			_listView.ColumnHeaderRightClicked += ListView_ColumnHeaderRightClicked;
 			BuildEntryContextMenu();
+			BuildColumnHeaderContextMenu();
 			_listView.ColumnReordered += (s, e) =>
 			{
 				if (!_restoringLayout)
@@ -187,10 +192,10 @@ namespace StockWatcher
 
 			// Reiter: Übersicht + Detailansichten
 			_tabControl = new TabControl { Dock = DockStyle.Fill };
-			_tabOverview = new TabPage("Übersicht");
-			_tabHolding = new TabPage("Bestand");
-			_tabBuyCandidate = new TabPage("Kaufinteresse");
-			_tabRealized = new TabPage("Realisiert");
+			_tabOverview = new TabPage(L10n.Text("TabOverview"));
+			_tabHolding = new TabPage(L10n.Text("TabHolding"));
+			_tabBuyCandidate = new TabPage(L10n.Text("TabBuyCandidate"));
+			_tabRealized = new TabPage(L10n.Text("TabRealized"));
 
 			_overviewFilterPanel = new FlowLayoutPanel
 			{
@@ -200,12 +205,12 @@ namespace StockWatcher
 				WrapContents = false,
 				Padding = new Padding(6, 4, 0, 0)
 			};
-			_chkOverviewHolding = new CheckBox { Text = "Bestand", AutoSize = true, Checked = true };
-			_chkOverviewBuyCandidate = new CheckBox { Text = "Kaufinteresse", AutoSize = true, Checked = true };
-			_chkOverviewRealized = new CheckBox { Text = "Realisiert", AutoSize = true, Checked = false };
-			_chkOverviewHolding.CheckedChanged += (s, e) => RefreshListView();
-			_chkOverviewBuyCandidate.CheckedChanged += (s, e) => RefreshListView();
-			_chkOverviewRealized.CheckedChanged += (s, e) => RefreshListView();
+			_chkOverviewHolding = new CheckBox { Text = L10n.Text("TabHolding"), AutoSize = true, Checked = _settings.OverviewFilterHolding };
+			_chkOverviewBuyCandidate = new CheckBox { Text = L10n.Text("TabBuyCandidate"), AutoSize = true, Checked = _settings.OverviewFilterBuyCandidate };
+			_chkOverviewRealized = new CheckBox { Text = L10n.Text("TabRealized"), AutoSize = true, Checked = _settings.OverviewFilterRealized };
+			_chkOverviewHolding.CheckedChanged += OverviewFilter_CheckedChanged;
+			_chkOverviewBuyCandidate.CheckedChanged += OverviewFilter_CheckedChanged;
+			_chkOverviewRealized.CheckedChanged += OverviewFilter_CheckedChanged;
 			_overviewFilterPanel.Controls.Add(_chkOverviewHolding);
 			_overviewFilterPanel.Controls.Add(_chkOverviewBuyCandidate);
 			_overviewFilterPanel.Controls.Add(_chkOverviewRealized);
@@ -213,22 +218,34 @@ namespace StockWatcher
 			_tabOverview.Controls.Add(_listView);
 			_tabOverview.Controls.Add(_overviewFilterPanel);
 			_tabControl.TabPages.AddRange(new[] { _tabOverview, _tabHolding, _tabBuyCandidate, _tabRealized });
+			_tabControl.Deselecting += TabControl_Deselecting;
 			_tabControl.SelectedIndexChanged += TabControl_SelectedIndexChanged;
 
+			_btnColumnChooser = new Button
+			{
+				Text = "▾",
+				Size = new Size(22, 21),
+				TabStop = false,
+				Anchor = AnchorStyles.Top | AnchorStyles.Right
+			};
+			_btnColumnChooser.Click += (s, e) => ShowColumnChooser();
+			_tabOverview.Controls.Add(_btnColumnChooser);
+
 			ConfigureColumnsForSelectedTab();
+			UpdateColumnChooserButtonBounds();
 
 			// Statusleiste
-			_lblStatus = new ToolStripStatusLabel("Bereit")
+			_lblStatus = new ToolStripStatusLabel(L10n.Text("StatusReady"))
 			{
 				Spring = false,
 				TextAlign = ContentAlignment.MiddleLeft
 			};
-			_lblPortfolioSummary = new ToolStripStatusLabel("| ◀▶ | 0 Pos. | – EUR | offen – EUR | realisiert 0.00 EUR | gesamt – EUR")
+			_lblPortfolioSummary = new ToolStripStatusLabel(L10n.Text("PortfolioInitial"))
 			{
 				Spring = false,
 				TextAlign = ContentAlignment.MiddleLeft
 			};
-			_lblNextUpdate = new ToolStripStatusLabel("Nächster Abruf: –")
+			_lblNextUpdate = new ToolStripStatusLabel(L10n.Text("NextFetchNone"))
 			{
 				Spring = true,
 				TextAlign = ContentAlignment.MiddleRight
@@ -251,15 +268,35 @@ namespace StockWatcher
 			LocationChanged += (s, e) => ScheduleLayoutSave();
 			SizeChanged += (s, e) => ScheduleLayoutSave();
 			ResizeEnd += (s, e) => ScheduleLayoutSave();
+
+			// Bei Tray-only-Start ist das endgültige TabPage-Layout beim BuildUi()
+			// noch nicht verfügbar. Den Feldauswahl-Button nach der ersten
+			// tatsächlichen Sichtbarschaltung deshalb nochmals positionieren.
+			Shown += (s, e) =>
+			{
+				UpdateColumnChooserButtonBounds();
+				_btnColumnChooser?.BringToFront();
+			};
 		}
 
 		private bool IsOverviewTab => _tabControl != null && _tabControl.SelectedTab == _tabOverview;
+
+		private void TabControl_Deselecting(object sender, TabControlCancelEventArgs e)
+		{
+			if (_restoringLayout || _settings == null || _listView == null) return;
+
+			_layoutSaveTimer?.Stop();
+			SaveCurrentColumnLayout();
+			SaveOverviewFilterSettings();
+			_settings.Save();
+		}
 
 		private void TabControl_SelectedIndexChanged(object sender, EventArgs e)
 		{
 			if (_tabControl.SelectedTab != null)
 			{
 				_tabControl.SelectedTab.Controls.Add(_listView);
+				_tabControl.SelectedTab.Controls.Add(_btnColumnChooser);
 
 				if (IsOverviewTab)
 				{
@@ -283,92 +320,28 @@ namespace StockWatcher
 			}
 
 			ConfigureColumnsForSelectedTab();
-
-			if (IsOverviewTab)
-			{
-				RestoreColumnOrder();
-				RestoreColumnWidths();
-			}
-
+			UpdateColumnChooserButtonBounds();
+			_btnColumnChooser?.BringToFront();
 			RefreshListView();
 		}
 
 		private void ConfigureColumnsForSelectedTab()
 		{
-			if (_listView == null || _tabControl == null) return;
-
-			_restoringLayout = true;
-			try
-			{
-				_listView.BeginUpdate();
-				_listView.Items.Clear();
-				_listView.Columns.Clear();
-
-				if (_tabControl.SelectedTab == _tabRealized)
-				{
-					_listView.Columns.Add("Name", 240);
-					_listView.Columns.Add("ISIN", 120);
-					_listView.Columns.Add("Stk.", 60);
-					_listView.Columns.Add("Kaufdatum", 95);
-					_listView.Columns.Add("Kaufkurs", 125);
-					_listView.Columns.Add("Einstand EUR", 125);
-					_listView.Columns.Add("Verkaufsdatum", 105);
-					_listView.Columns.Add("Verkaufskurs", 125);
-					_listView.Columns.Add("Verkaufswert EUR", 135);
-					_listView.Columns.Add("G/V EUR", 105);
-					_listView.Columns.Add("G/V %", 80);
-					_listView.Columns.Add("Akt. Kurs", 125);
-					_listView.Columns.Add("Bemerkung", 300);
-					_listView.Columns.Add("Status", 170);
-				}
-				else
-				{
-					bool overview = _tabControl.SelectedTab == _tabOverview;
-					_listView.Columns.Add("Name", 240);
-					_listView.Columns.Add("ISIN", 120);
-					_listView.Columns.Add("Stk.", 55);
-					_listView.Columns.Add("Kauf-/Referenzkurs", 140);
-					_listView.Columns.Add("Kauf-/Referenzwert", 150);
-					_listView.Columns.Add("▲▼", 45, HorizontalAlignment.Center);
-					_listView.Columns.Add(overview ? "Kurs" : "Akt. Kurs", 130);
-					_listView.Columns.Add(overview ? "Wert" : "Marktwert", 135);
-					_listView.Columns.Add(overview ? "G/V EUR" : "Diff. EUR", 105);
-					_listView.Columns.Add(overview ? "G/V %" : "Diff. %", 80);
-					_listView.Columns.Add("Limit ▼", 110);
-					_listView.Columns.Add("Limit ▲", 110);
-					_listView.Columns.Add("Eintragsart", 105);
-					_listView.Columns.Add("Bemerkung", 300);
-					_listView.Columns.Add("Status", 160);
-				}
-
-				foreach (ColumnHeader col in _listView.Columns)
-					col.Tag = col.Text;
-
-				_sortCol = -1;
-				_sortDir = SortOrder.None;
-				_sorter.Column = 0;
-				_sorter.Order = SortOrder.Ascending;
-				_sorter.TreatAsDate = false;
-			}
-			finally
-			{
-				_listView.EndUpdate();
-				_restoringLayout = false;
-			}
+			ConfigureColumnsForSelectedTabCore();
 		}
 
 
 		private void BuildEntryContextMenu()
 		{
 			_entryContextMenu = new ContextMenuStrip();
-			_entryContextMenu.Items.Add("Neu laden (Refresh / Reload)", null,
+			_entryContextMenu.Items.Add(L10n.Text("EntryMenuReload"), null,
 				(s, e) => RefreshSelectedEntry());
 			_entryContextMenu.Items.Add(new ToolStripSeparator());
-			_entryContextMenu.Items.Add("Kopiere in neue Bestandsposition", null,
+			_entryContextMenu.Items.Add(L10n.Text("EntryMenuCopyHolding"), null,
 				(s, e) => CopySelectedEntry(WatchlistEntryType.Holding));
-			_entryContextMenu.Items.Add("Kopiere in neue Watchlist-Position", null,
+			_entryContextMenu.Items.Add(L10n.Text("EntryMenuCopyWatchlist"), null,
 				(s, e) => CopySelectedEntry(WatchlistEntryType.BuyCandidate));
-			_entryContextMenu.Items.Add("Kopiere in neue realisierte Position", null,
+			_entryContextMenu.Items.Add(L10n.Text("EntryMenuCopyRealized"), null,
 				(s, e) => CopySelectedEntry(WatchlistEntryType.Realized));
 			_entryContextMenu.Opening += (s, e) =>
 			{
@@ -412,10 +385,10 @@ namespace StockWatcher
 			using (var dlg = new EditEntryDialog(_client, copy))
 			{
 				dlg.Text = targetType == WatchlistEntryType.Holding
-					? "Neue Bestandsposition aus Kopie"
+					? L10n.Text("CopyTitleHolding")
 					: targetType == WatchlistEntryType.BuyCandidate
-						? "Neue Watchlist-Position aus Kopie"
-						: "Neue realisierte Position aus Kopie";
+						? L10n.Text("CopyTitleWatchlist")
+						: L10n.Text("CopyTitleRealized");
 
 				if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Result != null)
 				{
@@ -473,15 +446,15 @@ namespace StockWatcher
 		private void BuildTrayIcon()
 		{
 			_trayMenu = new ContextMenuStrip();
-			_trayMenu.Items.Add("App anzeigen", null, (s, e) => ShowMainWindow());
-			_trayMenu.Items.Add("Jetzt abrufen", null, (s, e) => _ = FetchAllQuotesAsync());
+			_trayMenu.Items.Add(L10n.Text("TrayShowApp"), null, (s, e) => ShowMainWindow());
+			_trayMenu.Items.Add(L10n.Text("MenuRefreshNow"), null, (s, e) => _ = FetchAllQuotesAsync());
 			_trayMenu.Items.Add(new ToolStripSeparator());
-			_trayMenu.Items.Add("Beenden", null, (s, e) => Application.Exit());
+			_trayMenu.Items.Add(L10n.Text("MenuExit"), null, (s, e) => Application.Exit());
 
 			_notifyIcon = new NotifyIcon
 			{
 				Icon             = _baseIcon,
-				Text             = "Stock Watcher",
+				Text             = L10n.Text("AppTitle"),
 				ContextMenuStrip = _trayMenu,
 				Visible          = true
 			};
@@ -548,47 +521,22 @@ namespace StockWatcher
 		{
 			if (_restoringLayout || _settings == null || _listView == null) return;
 
-			SaveColumnWidths();
+			SaveCurrentColumnLayout();
+			SaveOverviewFilterSettings();
 			SaveWindowLayout();
 			_settings.Save();
 		}
 
 		private void SaveColumnWidths()
 		{
-			if (!IsOverviewTab) return;
-
-			var parts = new string[_listView.Columns.Count];
-			for (int i = 0; i < _listView.Columns.Count; i++)
-				parts[i] = _listView.Columns[i].Width.ToString(CultureInfo.InvariantCulture);
-			_settings.ColumnWidths = string.Join(",", parts);
+			SaveCurrentColumnLayout();
 		}
 
 		private void RestoreColumnWidths()
 		{
-			if (!IsOverviewTab || string.IsNullOrWhiteSpace(_settings.ColumnWidths)) return;
-
-			string[] parts = _settings.ColumnWidths.Split(',');
-
-			// Bei geänderter Spaltenstruktur bewusst das neue Default-Layout verwenden.
-			if (parts.Length != _listView.Columns.Count) return;
-
-			_restoringLayout = true;
-			try
-			{
-				for (int i = 0; i < parts.Length; i++)
-				{
-					if (int.TryParse(parts[i].Trim(), NumberStyles.Integer,
-						CultureInfo.InvariantCulture, out int width) && width > 0)
-					{
-						_listView.Columns[i].Width = Math.Max(30, Math.Min(5000, width));
-					}
-				}
-			}
-			finally
-			{
-				_restoringLayout = false;
-			}
+			// V1.1.4: Wiederherstellung erfolgt ID-basiert in ConfigureColumnsForSelectedTabCore().
 		}
+
 
 		private void SaveWindowLayout()
 		{
@@ -684,48 +632,15 @@ namespace StockWatcher
 
 		private void SaveColumnOrder()
 		{
-			if (!IsOverviewTab) return;
-
-			var parts = new string[_listView.Columns.Count];
-			for (int i = 0; i < _listView.Columns.Count; i++)
-				parts[i] = _listView.Columns[i].DisplayIndex.ToString();
-			_settings.ColumnOrder = string.Join(",", parts);
+			SaveCurrentColumnLayout();
 			_settings.Save();
 		}
 
 		private void RestoreColumnOrder()
 		{
-			if (!IsOverviewTab || string.IsNullOrWhiteSpace(_settings.ColumnOrder)) return;
-			string[] parts = _settings.ColumnOrder.Split(',');
-
-			// Bei geänderter Spaltenstruktur bewusst das neue Default-Layout verwenden.
-			if (parts.Length != _listView.Columns.Count) return;
-
-			_restoringLayout = true;
-			try
-			{
-				// Aufsteigend nach Ziel-DisplayIndex setzen, um Konflikte zu vermeiden
-				var pairs = new System.Collections.Generic.List<(int col, int disp)>();
-				for (int i = 0; i < parts.Length; i++)
-				{
-					if (!int.TryParse(parts[i].Trim(), out int d)) return;
-					pairs.Add((i, d));
-				}
-
-				pairs.Sort((a, b) => a.disp.CompareTo(b.disp));
-
-				foreach (var (col, disp) in pairs)
-					_listView.Columns[col].DisplayIndex = disp;
-			}
-			catch
-			{
-				/* Fehler beim Wiederherstellen ignorieren */
-			}
-			finally
-			{
-				_restoringLayout = false;
-			}
+			// V1.1.4: Wiederherstellung erfolgt ID-basiert in ConfigureColumnsForSelectedTabCore().
 		}
+
 
 		// -----------------------------------------------------------------------
 		// Spalten sortieren
@@ -744,15 +659,21 @@ namespace StockWatcher
 
 			// Pfeil-Indikator in Spaltenköpfen aktualisieren
 			foreach (ColumnHeader col in _listView.Columns)
-				col.Text = (string)col.Tag;
-			_listView.Columns[_sortCol].Text = (string)_listView.Columns[_sortCol].Tag +
+			{
+				ColumnDefinition definition = col.Tag as ColumnDefinition;
+				if (definition != null)
+					col.Text = definition.Header;
+			}
+
+			ColumnDefinition sortDefinition = _listView.Columns[_sortCol].Tag as ColumnDefinition;
+			string baseColumnText = sortDefinition?.Header ?? _listView.Columns[_sortCol].Text;
+			_listView.Columns[_sortCol].Text = baseColumnText +
 				(_sortDir == SortOrder.Ascending ? "  ▲" : "  ▼");
 
 			_sorter.Column = _sortCol;
 			_sorter.Order  = _sortDir;
-			string baseColumnText = _listView.Columns[_sortCol].Tag as string ?? "";
-			_sorter.TreatAsDate = baseColumnText.IndexOf(
-				"datum", StringComparison.OrdinalIgnoreCase) >= 0;
+			_sorter.TreatAsDate = sortDefinition?.TreatAsDate ??
+				baseColumnText.IndexOf("datum", StringComparison.OrdinalIgnoreCase) >= 0;
 			_listView.Sort();
 		}
 
@@ -790,7 +711,7 @@ namespace StockWatcher
 			if (_nextFetchTime == DateTime.MinValue) return;
 			TimeSpan remaining = _nextFetchTime - DateTime.Now;
 			if (remaining < TimeSpan.Zero) remaining = TimeSpan.Zero;
-			_lblNextUpdate.Text = $"Nächster Abruf: {remaining:mm\\:ss}";
+			_lblNextUpdate.Text = L10n.Format("NextFetch", remaining);
 		}
 
 		// -----------------------------------------------------------------------
@@ -812,8 +733,8 @@ namespace StockWatcher
 			_fetchRunning = true;
 			_timer.Stop();
 			_nextFetchTime = DateTime.MinValue;
-			_lblNextUpdate.Text = "Nächster Abruf: –";
-			_lblStatus.Text = "Abruf läuft…";
+			_lblNextUpdate.Text = L10n.Text("NextFetchNone");
+			_lblStatus.Text = L10n.Text("FetchRunning");
 
 			bool retrySoon = false;
 
@@ -824,7 +745,7 @@ namespace StockWatcher
 				for (int i = 0; i < fetchEntries.Count; i++)
 				{
 					WatchlistEntry entry = fetchEntries[i];
-					_lblStatus.Text = $"Abruf {i + 1}/{fetchEntries.Count}: {entry.Name}…";
+					_lblStatus.Text = L10n.Format("FetchProgress", i + 1, fetchEntries.Count, entry.Name);
 
 					FetchEntryOutcome outcome;
 					using (var cts = new CancellationTokenSource(EntryFetchTimeout))
@@ -837,9 +758,9 @@ namespace StockWatcher
 					{
 						retrySoon = true;
 						string reason = outcome == FetchEntryOutcome.TimedOut
-							? "Timeout beim Datenabruf"
-							: "Netzwerk/Yahoo nicht erreichbar";
-						_lblStatus.Text = $"Abruf abgebrochen: {reason} – neuer Versuch in 1 Min.";
+							? L10n.Text("TimeoutData")
+							: L10n.Text("NetworkYahooUnavailable");
+						_lblStatus.Text = L10n.Format("FetchAbortedRetry", reason);
 						break;
 					}
 				}
@@ -847,17 +768,17 @@ namespace StockWatcher
 				try { _settings.Save(); }
 				catch (Exception ex)
 				{
-					_lblStatus.Text = $"Fehler beim Speichern: {ex.Message}";
+					_lblStatus.Text = L10n.Format("SaveError", ex.Message);
 				}
 
 				RefreshListView(updatePortfolioTrend: !retrySoon);
 				if (!retrySoon)
-					_lblStatus.Text = $"Zuletzt aktualisiert: {DateTime.Now:HH:mm:ss}";
+					_lblStatus.Text = L10n.Format("LastUpdated", DateTime.Now);
 			}
 			catch (Exception ex)
 			{
 				retrySoon = true;
-				_lblStatus.Text = $"Abruf abgebrochen: {ex.Message} – neuer Versuch in 1 Min.";
+				_lblStatus.Text = L10n.Format("FetchErrorRetry", ex.Message);
 			}
 			finally
 			{
@@ -882,7 +803,7 @@ namespace StockWatcher
 			}
 			catch (Exception ex)
 			{
-				entry.StatusText = $"Fehler beim Abruf [{ex.Message}]";
+				entry.StatusText = L10n.Format("FetchSingleError", ex.Message);
 				RefreshListView();
 			}
 		}
@@ -899,7 +820,7 @@ namespace StockWatcher
 				DateTime.Now < entry.NextLookupAttempt)
 			{
 				TimeSpan wait = entry.NextLookupAttempt - DateTime.Now;
-				entry.StatusText = $"Symbol unbekannt – nächster Versuch in {(int)wait.TotalMinutes} Min.";
+				entry.StatusText = L10n.Format("SymbolUnknownRetry", (int)wait.TotalMinutes);
 				return FetchEntryOutcome.Failed;
 			}
 
@@ -911,7 +832,7 @@ namespace StockWatcher
 			catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 			{
 				MarkRetrievalFailure(entry);
-				entry.StatusText = "Timeout beim Datenabruf";
+				entry.StatusText = L10n.Text("TimeoutData");
 				return FetchEntryOutcome.TimedOut;
 			}
 			if (result.Success)
@@ -956,7 +877,7 @@ namespace StockWatcher
 				{
 					entry.FxRate = 0;
 					entry.LastPriceEur = 0;
-					entry.StatusText = $"OK {result.Timestamp:HH:mm}  (Kurswährung n.v.)";
+					entry.StatusText = L10n.Format("StatusQuoteCurrencyUnavailable", result.Timestamp);
 				}
 				else if (string.Equals(quoteCurrency, "EUR", StringComparison.OrdinalIgnoreCase))
 				{
@@ -974,7 +895,7 @@ namespace StockWatcher
 					catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 					{
 						MarkRetrievalFailure(entry);
-						entry.StatusText = "Timeout beim Datenabruf";
+						entry.StatusText = L10n.Text("TimeoutData");
 						return FetchEntryOutcome.TimedOut;
 					}
 
@@ -991,7 +912,7 @@ namespace StockWatcher
 						entry.FxRate = 0;
 						entry.LastPriceEur = 0;
 						entry.StatusText = entry.ConvertToEur
-							? $"OK {result.Timestamp:HH:mm}  {result.Price:N2} {quoteCurrency} (FX n.v.)"
+							? $"OK {result.Timestamp:HH:mm}  {result.Price:N2} {quoteCurrency} ({L10n.Text("StatusFxUnavailable")})"
 							: $"OK  {result.Timestamp:HH:mm}";
 					}
 				}
@@ -1010,7 +931,7 @@ namespace StockWatcher
 				catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
 				{
 					MarkRetrievalFailure(entry);
-					entry.StatusText = "Timeout beim Datenabruf";
+					entry.StatusText = L10n.Text("TimeoutData");
 					return FetchEntryOutcome.TimedOut;
 				}
 
@@ -1025,7 +946,7 @@ namespace StockWatcher
 
 				if (result.IsTransientFailure)
 				{
-					entry.StatusText = $"Netzwerk/Yahoo nicht erreichbar{errDetail}";
+					entry.StatusText = L10n.Format("StatusNetworkUnavailable", errDetail);
 					return FetchEntryOutcome.TransientFailure;
 				}
 
@@ -1033,11 +954,11 @@ namespace StockWatcher
 				if (entry.LookupFailCount >= LookupMaxFails)
 				{
 					entry.NextLookupAttempt = DateTime.Now.Add(LookupRetryInterval);
-					entry.StatusText = $"Fehler – nächster Versuch in 1h{errDetail}";
+					entry.StatusText = L10n.Format("StatusErrorRetry1h", errDetail);
 				}
 				else
 				{
-					entry.StatusText = $"Nicht gefunden ({entry.LookupFailCount}/{LookupMaxFails}){errDetail}";
+					entry.StatusText = L10n.Format("StatusNotFound", entry.LookupFailCount, LookupMaxFails, errDetail);
 				}
 
 				return FetchEntryOutcome.Failed;
@@ -1122,8 +1043,8 @@ namespace StockWatcher
 			if (_listView.SelectedItems.Count == 0) return;
 			WatchlistEntry entry = (WatchlistEntry)_listView.SelectedItems[0].Tag;
 
-			if (MessageBox.Show($"'{entry.Name}' aus der Watchlist entfernen?",
-					"Bestätigen", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+			if (MessageBox.Show(L10n.Format("RemoveConfirm", entry.Name),
+					L10n.Text("ConfirmTitle"), MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
 			{
 				_settings.Watchlist.Remove(entry);
 				_priceTrendIndicators.Remove(entry);
@@ -1264,8 +1185,8 @@ namespace StockWatcher
 		private void FireAlarm(WatchlistEntry entry, bool isUpperAlarm, LimitEvaluation evaluation)
 		{
 			string alarmPrefix = entry.EntryType == WatchlistEntryType.BuyCandidate
-				? "Alarm Watchlist" : "Alarm Bestand";
-			string direction = isUpperAlarm ? "▲ Oberes Limit" : "▼ Unteres Limit";
+				? L10n.Text("AlarmWatchlist") : L10n.Text("AlarmHolding");
+			string direction = isUpperAlarm ? L10n.Text("UpperLimitArrow") : L10n.Text("LowerLimitArrow");
 			string limitText = FormatAlarmLimit(entry, isUpperAlarm, evaluation);
 			string currentText = FormatPrice(evaluation.CurrentPrice, evaluation.Currency);
 
@@ -1274,8 +1195,8 @@ namespace StockWatcher
 
 			if (_settings.NotifyBalloon)
 				_notifyIcon.ShowBalloonTip(8000,
-					$"{alarmPrefix}: {entry.Name}",
-					$"{direction} {limitText} – aktuell {currentText}",
+					L10n.Format("TrayBalloonAlarm", alarmPrefix, entry.Name),
+					L10n.Format("TrayBalloonBody", direction, limitText, currentText),
 					isUpperAlarm ? ToolTipIcon.Info : ToolTipIcon.Warning);
 
 			if (_settings.NotifyAlarmDialog)
@@ -1340,15 +1261,14 @@ namespace StockWatcher
 			try
 			{
 				string alarmPrefix = entry.EntryType == WatchlistEntryType.BuyCandidate
-					? "Alarm Watchlist" : "Alarm Bestand";
-				string direction = isUpperAlarm ? "▲ Oberes Limit" : "▼ Unteres Limit";
+					? L10n.Text("AlarmWatchlist") : L10n.Text("AlarmHolding");
+				string direction = isUpperAlarm ? L10n.Text("UpperLimitArrow") : L10n.Text("LowerLimitArrow");
 
 				// ntfy: Titel bewusst als echter Titelparameter übertragen.
 				// Uri.EscapeDataString gehört in die URL, nicht in den HTTP-Header;
 				// so zeigt ntfy Leerzeichen/Umlaute korrekt statt als %20/%C3... an.
 				string title = $"{alarmPrefix}: {entry.Name}";
-				string body  = $"{direction} {limitText} erreicht\n" +
-				               $"Aktuell: {currentText}";
+				string body = L10n.Format("AlarmReached", direction, limitText, currentText);
 				string requestUrl = $"{url}/{topic}?title={Uri.EscapeDataString(title)}&priority=high";
 
 				var req = new System.Net.Http.HttpRequestMessage(
@@ -1366,7 +1286,7 @@ namespace StockWatcher
 			if (_dotActive) return;
 			_dotActive          = true;
 			_notifyIcon.Icon    = _dotIcon;
-			_notifyIcon.Text    = "Stock Watcher – Kurs-Alarm!";
+			_notifyIcon.Text    = L10n.Text("TrayAlarmText");
 		}
 
 		private void ClearTrayDot()
@@ -1374,7 +1294,7 @@ namespace StockWatcher
 			if (!_dotActive) return;
 			_dotActive          = false;
 			_notifyIcon.Icon    = _baseIcon;
-			_notifyIcon.Text    = "Stock Watcher";
+			_notifyIcon.Text    = L10n.Text("AppTitle");
 		}
 
 		// -----------------------------------------------------------------------
@@ -1448,7 +1368,7 @@ namespace StockWatcher
 
 			string currency = entry.AbsoluteLimitCurrency;
 			return string.IsNullOrWhiteSpace(currency)
-				? $"{value:N2} [Währung fehlt]"
+				? $"{value:N2} [{L10n.Text("CurrencyMissingShort")}]"
 				: $"{value:N2} {currency}";
 		}
 
@@ -1498,264 +1418,14 @@ namespace StockWatcher
 
 		private void AddStandardListItem(WatchlistEntry entry)
 		{
-			bool realized = entry.EntryType == WatchlistEntryType.Realized;
-			bool dataRetrievalTimedOut = !realized && IsDataRetrievalTimedOut(entry);
-			string displayedStatusText = realized
-				? entry.SaleDate != DateTime.MinValue
-					? $"Realisiert {entry.SaleDate:dd.MM.yyyy}"
-					: "Realisiert"
-				: dataRetrievalTimedOut
-					? "NOK: Timeout for Data Retrieval"
-					: entry.StatusText;
-
-			string priceTrendText = realized
-				? "–"
-				: _priceTrendIndicators.TryGetValue(entry, out string priceTrend) ? priceTrend : "◀▶";
-
-			string priceText;
-			string valueText;
-			string diffAmtText;
-			string diffPctText;
-			Color diffColor;
-
-			if (realized)
-			{
-				priceText = entry.SalePrice > 0
-					? FormatPrice(entry.SalePrice, entry.EffectiveSaleCurrency)
-					: "–";
-
-				valueText = TryGetSaleValueEur(entry, out double saleValueEur)
-					? $"{saleValueEur:N2} EUR"
-					: "–";
-
-				if (TryGetRealizedGainLossEur(entry, out double realizedGainLossEur, out double realizedGainLossPct))
-				{
-					double displayAmt = NormalizeTwoDecimalDisplay(realizedGainLossEur);
-					double displayPct = NormalizeTwoDecimalDisplay(realizedGainLossPct);
-					diffAmtText = $"{(displayAmt > 0 ? "+" : "")}{displayAmt:N2} EUR";
-					diffPctText = $"{(displayPct > 0 ? "+" : "")}{displayPct:N2} %";
-					diffColor = realizedGainLossEur >= 0 ? Color.DarkGreen : Color.Firebrick;
-				}
-				else
-				{
-					diffAmtText = "–";
-					diffPctText = "–";
-					diffColor = SystemColors.WindowText;
-				}
-			}
-			else
-			{
-				// Kurs-Spalte: einheitlich mit ISO-Währungscode, kein €-Symbol
-				if (entry.LastPrice <= 0.0)
-				{
-					priceText = "–";
-				}
-				else if (entry.ConvertToEur && entry.LastPriceEur > 0)
-				{
-					priceText = $"{entry.LastPriceEur:N2} EUR";
-				}
-				else
-				{
-					priceText = string.IsNullOrEmpty(entry.QuoteCurrency)
-						? entry.LastPrice.ToString("N2")
-						: $"{entry.LastPrice:N2} {entry.QuoteCurrency}";
-				}
-
-				valueText = "–";
-				if (entry.Quantity > 0 && entry.LastPrice > 0)
-				{
-					if (entry.ConvertToEur && entry.LastPriceEur > 0)
-					{
-						valueText = $"{entry.Quantity * entry.LastPriceEur:N2} EUR";
-					}
-					else
-					{
-						double marketValue = entry.Quantity * entry.LastPrice;
-						valueText = string.IsNullOrWhiteSpace(entry.QuoteCurrency)
-							? $"{marketValue:N2}"
-							: $"{marketValue:N2} {entry.QuoteCurrency}";
-					}
-				}
-
-				double effectiveFx = entry.EffectiveReferenceFxRate;
-				bool hasDiff = entry.Quantity > 0 &&
-				               entry.ReferencePrice > 0 &&
-				               entry.LastPriceEur > 0 &&
-				               effectiveFx > 0;
-
-				double referenceEur = hasDiff ? entry.Quantity * entry.ReferencePrice * effectiveFx : 0;
-				double currentEur   = hasDiff ? entry.Quantity * entry.LastPriceEur : 0;
-				double diffAmt      = hasDiff ? currentEur - referenceEur : 0;
-				double diffPct      = hasDiff ? (currentEur - referenceEur) / referenceEur * 100.0 : 0;
-
-				double displayDiffAmt = NormalizeTwoDecimalDisplay(diffAmt);
-				double displayDiffPct = NormalizeTwoDecimalDisplay(diffPct);
-				diffAmtText = hasDiff ? $"{(displayDiffAmt > 0 ? "+" : "")}{displayDiffAmt:N2} EUR" : "–";
-				diffPctText = hasDiff ? $"{(displayDiffPct > 0 ? "+" : "")}{displayDiffPct:N2} %" : "–";
-				diffColor = hasDiff ? (diffAmt >= 0 ? Color.DarkGreen : Color.Firebrick) : SystemColors.WindowText;
-			}
-
-			string qtyText = entry.Quantity > 0 ? entry.Quantity.ToString("N0") : "–";
-			string referenceText = entry.ReferencePrice > 0
-				? $"{entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
-				: "–";
-			string referenceValueText = entry.Quantity > 0 && entry.ReferencePrice > 0
-				? $"{entry.Quantity * entry.ReferencePrice:N2} {entry.EffectiveReferenceCurrency}"
-				: "–";
-
-			string upperText = realized ? "–" : FormatListLimit(entry, true);
-			string lowerText = realized ? "–" : FormatListLimit(entry, false);
-			string typeText = entry.EntryType == WatchlistEntryType.BuyCandidate
-				? "Kaufinteresse"
-				: entry.EntryType == WatchlistEntryType.Realized ? "Realisiert" : "Bestand";
-			string noteText = NormalizeNote(entry.Note);
-
-			var item = new ListViewItem(entry.Name) { UseItemStyleForSubItems = false };
-			var siIsin = new ListViewItem.ListViewSubItem { Text = entry.Isin };
-			item.SubItems.Add(siIsin);
-			item.SubItems.Add(qtyText);
-			item.SubItems.Add(referenceText);
-			item.SubItems.Add(referenceValueText);
-			item.SubItems.Add(priceTrendText);
-			item.SubItems.Add(priceText);
-			item.SubItems.Add(valueText);
-
-			var siDiffAmt = new ListViewItem.ListViewSubItem { Text = diffAmtText, ForeColor = diffColor };
-			var siDiffPct = new ListViewItem.ListViewSubItem { Text = diffPctText, ForeColor = diffColor };
-			item.SubItems.Add(siDiffAmt);
-			item.SubItems.Add(siDiffPct);
-
-			var siLower = new ListViewItem.ListViewSubItem { Text = lowerText };
-			if (realized || !entry.LimitLowerEnabled)
-			{
-				siLower.ForeColor = Color.Gray;
-				siLower.Font = _disabledLimitFont;
-			}
-			item.SubItems.Add(siLower);
-
-			var siUpper = new ListViewItem.ListViewSubItem { Text = upperText };
-			if (realized || !entry.LimitUpperEnabled)
-			{
-				siUpper.ForeColor = Color.Gray;
-				siUpper.Font = _disabledLimitFont;
-			}
-			item.SubItems.Add(siUpper);
-
-			item.SubItems.Add(typeText);
-			item.SubItems.Add(noteText);
-			var siStatus = new ListViewItem.ListViewSubItem { Text = displayedStatusText };
-			item.SubItems.Add(siStatus);
-
-			if (!realized)
-			{
-				if (entry.UpperLimitReached)
-					item.BackColor = Color.FromArgb(200, 255, 200);
-				else if (entry.LowerLimitReached)
-					item.BackColor = Color.FromArgb(255, 200, 200);
-			}
-
-			if (dataRetrievalTimedOut)
-			{
-				Color warningColor = Color.LightYellow;
-				item.SubItems[0].BackColor = warningColor;
-				siIsin.BackColor = warningColor;
-				siStatus.BackColor = warningColor;
-			}
-
-			item.Tag = entry;
-			_listView.Items.Add(item);
+			AddDynamicListItem(entry, false);
 		}
 
 		private void AddRealizedDetailItem(WatchlistEntry entry)
 		{
-			bool dataRetrievalTimedOut = IsDataRetrievalTimedOut(entry);
-			string qtyText = entry.Quantity > 0 ? entry.Quantity.ToString("N0") : "–";
-			string buyDateText = entry.ReferenceDate != DateTime.MinValue ? entry.ReferenceDate.ToString("dd.MM.yyyy") : "–";
-			string buyPriceText = entry.ReferencePrice > 0
-				? FormatPrice(entry.ReferencePrice, entry.EffectiveReferenceCurrency)
-				: "–";
-			string referenceValueText = TryGetReferenceValueEur(entry, out double referenceValueEur)
-				? $"{referenceValueEur:N2} EUR"
-				: "–";
-			string saleDateText = entry.SaleDate != DateTime.MinValue ? entry.SaleDate.ToString("dd.MM.yyyy") : "–";
-			string salePriceText = entry.SalePrice > 0
-				? FormatPrice(entry.SalePrice, entry.EffectiveSaleCurrency)
-				: "–";
-			string saleValueText = TryGetSaleValueEur(entry, out double saleValueEur)
-				? $"{saleValueEur:N2} EUR"
-				: "–";
-
-			string currentPriceText;
-			if (entry.LastPrice <= 0.0)
-			{
-				currentPriceText = "–";
-			}
-			else if (entry.ConvertToEur && entry.LastPriceEur > 0.0)
-			{
-				currentPriceText = $"{entry.LastPriceEur:N2} EUR";
-			}
-			else
-			{
-				currentPriceText = string.IsNullOrWhiteSpace(entry.QuoteCurrency)
-					? entry.LastPrice.ToString("N2")
-					: $"{entry.LastPrice:N2} {entry.QuoteCurrency}";
-			}
-
-			string gainLossText = "–";
-			string gainLossPctText = "–";
-			Color gainLossColor = SystemColors.WindowText;
-			if (TryGetRealizedGainLossEur(entry, out double gainLossEur, out double gainLossPct))
-			{
-				double displayAmt = NormalizeTwoDecimalDisplay(gainLossEur);
-				double displayPct = NormalizeTwoDecimalDisplay(gainLossPct);
-				gainLossText = $"{(displayAmt > 0 ? "+" : "")}{displayAmt:N2} EUR";
-				gainLossPctText = $"{(displayPct > 0 ? "+" : "")}{displayPct:N2} %";
-				gainLossColor = gainLossEur >= 0 ? Color.DarkGreen : Color.Firebrick;
-			}
-
-			string statusText = dataRetrievalTimedOut
-				? "NOK: Timeout for Data Retrieval"
-				: entry.StatusText;
-
-			var item = new ListViewItem(entry.Name) { UseItemStyleForSubItems = false };
-			var siIsin = new ListViewItem.ListViewSubItem { Text = entry.Isin };
-			item.SubItems.Add(siIsin);
-			item.SubItems.Add(qtyText);
-			item.SubItems.Add(buyDateText);
-			item.SubItems.Add(buyPriceText);
-			item.SubItems.Add(referenceValueText);
-			item.SubItems.Add(saleDateText);
-			item.SubItems.Add(salePriceText);
-			item.SubItems.Add(saleValueText);
-
-			item.SubItems.Add(new ListViewItem.ListViewSubItem { Text = gainLossText, ForeColor = gainLossColor });
-			item.SubItems.Add(new ListViewItem.ListViewSubItem { Text = gainLossPctText, ForeColor = gainLossColor });
-
-			var siCurrentPrice = new ListViewItem.ListViewSubItem { Text = currentPriceText };
-			int currentVsSale = CompareCurrentPriceToSalePrice(entry);
-			if (currentVsSale > 0)
-				siCurrentPrice.ForeColor = Color.DarkGreen;
-			else if (currentVsSale < 0)
-				siCurrentPrice.ForeColor = Color.Firebrick;
-			item.SubItems.Add(siCurrentPrice);
-
-			item.SubItems.Add(NormalizeNote(entry.Note));
-
-			var siStatus = new ListViewItem.ListViewSubItem { Text = statusText };
-			item.SubItems.Add(siStatus);
-
-			if (dataRetrievalTimedOut)
-			{
-				Color warningColor = Color.LightYellow;
-				item.SubItems[0].BackColor = warningColor;
-				siIsin.BackColor = warningColor;
-				siCurrentPrice.BackColor = warningColor;
-				siStatus.BackColor = warningColor;
-			}
-
-			item.Tag = entry;
-			_listView.Items.Add(item);
+			AddDynamicListItem(entry, true);
 		}
+
 
 		private static string NormalizeNote(string note) =>
 			(note ?? "")
@@ -1950,9 +1620,8 @@ namespace StockWatcher
 				? FormatSignedEur(totalOpenGainLossEur + totalRealizedGainLossEur)
 				: "– EUR";
 
-			_lblPortfolioSummary.Text =
-				$"| {_portfolioTrendIndicator} | {positionCount} Pos. | {marketValueText} | " +
-				$"offen {openText} | realisiert {realizedText} | gesamt {totalText}";
+			_lblPortfolioSummary.Text = L10n.Format("PortfolioSummary",
+				_portfolioTrendIndicator, positionCount, marketValueText, openText, realizedText, totalText);
 		}
 
 		private static string FormatSignedEur(double value)
@@ -1991,8 +1660,8 @@ namespace StockWatcher
 			{
 				e.Cancel = true;
 				Hide();
-				_notifyIcon.ShowBalloonTip(2000, "Stock Watcher",
-					"Läuft im Hintergrund weiter.", ToolTipIcon.Info);
+				_notifyIcon.ShowBalloonTip(2000, L10n.Text("AppTitle"),
+					L10n.Text("TrayBackground"), ToolTipIcon.Info);
 			}
 		}
 
@@ -2004,6 +1673,7 @@ namespace StockWatcher
 				_disabledLimitFont?.Dispose();
 				_notifyIcon?.Dispose();
 				_entryContextMenu?.Dispose();
+				_columnHeaderContextMenu?.Dispose();
 				_timer?.Dispose();
 				_countdownTimer?.Dispose();
 				_layoutSaveTimer?.Dispose();
@@ -2114,7 +1784,9 @@ namespace StockWatcher
 					"d.M.yyyy",
 					"d.MM.yyyy",
 					"dd.M.yyyy",
-					"yyyy-MM-dd"
+					"yyyy-MM-dd",
+					"dd.MM.yyyy HH:mm:ss",
+					"yyyy-MM-dd HH:mm:ss"
 				};
 
 				return DateTime.TryParseExact(

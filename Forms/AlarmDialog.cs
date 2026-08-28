@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Windows.Forms;
+using StockWatcher.Localization;
 using StockWatcher.Models;
 
 namespace StockWatcher.Forms
@@ -20,7 +21,7 @@ namespace StockWatcher.Forms
 			string currentText)
 		{
 			string alarmPrefix = entry.EntryType == WatchlistEntryType.BuyCandidate
-				? "Alarm Watchlist" : "Alarm Bestand";
+				? L10n.Text("AlarmWatchlist") : L10n.Text("AlarmHolding");
 			Text = $"⚠ {alarmPrefix}";
 			ClientSize = new Size(440, 180);
 			StartPosition = FormStartPosition.CenterScreen;
@@ -29,13 +30,11 @@ namespace StockWatcher.Forms
 			MinimizeBox = false;
 			TopMost = true;
 
-			string direction = isUpperAlarm ? "Oberes Limit" : "Unteres Limit";
+			string direction = isUpperAlarm ? L10n.Text("UpperLimit") : L10n.Text("LowerLimit");
 
 			_lblInfo = new Label
 			{
-				Text = $"{entry.Name} ({entry.Isin})\r\n\r\n" +
-				       $"Kurs: {currentText}  |  {direction}: {limitText}\r\n\r\n" +
-				       $"Stand: {entry.LastUpdate:HH:mm:ss}",
+				Text = L10n.Format("AlarmDialogInfo", entry.Name, entry.Isin, currentText, direction, limitText, entry.LastUpdate),
 				Location = new Point(16, 16),
 				Size = new Size(400, 100),
 				Font = new Font("Segoe UI", 10f),
@@ -44,7 +43,7 @@ namespace StockWatcher.Forms
 
 			_btnOk = new Button
 			{
-				Text = "OK",
+				Text = L10n.Text("ButtonOk"),
 				Location = new Point(184, 132),
 				Size = new Size(90, 32),
 				DialogResult = DialogResult.OK,
@@ -53,7 +52,7 @@ namespace StockWatcher.Forms
 
 			_btnSnooze = new Button
 			{
-				Text = "Snooze (1 Zyklus)",
+				Text = L10n.Text("SnoozeOneCycle"),
 				Location = new Point(284, 132),
 				Size = new Size(140, 32),
 				UseVisualStyleBackColor = true

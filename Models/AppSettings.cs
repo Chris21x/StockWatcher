@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
@@ -12,8 +13,13 @@ namespace StockWatcher.Models
 		// ---- Einstellungen ----
 		public int    IntervalMinutes  { get; set; } = 10;
 		public int    DataRetrievalTimeoutMinutes { get; set; } = 240;
-		public string ColumnOrder      { get; set; } = "";
-		public string ColumnWidths     { get; set; } = "";
+		public string ColumnOrder      { get; set; } = ""; // Legacy: Übersicht bis V1.1.3.x
+		public string ColumnWidths     { get; set; } = ""; // Legacy: Übersicht bis V1.1.3.x
+		public Dictionary<string, List<ColumnLayoutItem>> ColumnLayouts { get; } =
+			new Dictionary<string, List<ColumnLayoutItem>>(StringComparer.OrdinalIgnoreCase);
+		public bool OverviewFilterHolding { get; set; } = true;
+		public bool OverviewFilterBuyCandidate { get; set; } = true;
+		public bool OverviewFilterRealized { get; set; } = false;
 		public int    MainWindowLeft   { get; set; } = 0;
 		public int    MainWindowTop    { get; set; } = 0;
 		public int    MainWindowWidth  { get; set; } = 0;
@@ -41,7 +47,7 @@ namespace StockWatcher.Models
 		/// <summary>ntfy-Server-URL. Standard: https://ntfy.sh</summary>
 		public string NtfyUrl     { get; set; } = "https://ntfy.sh";
 
-		// Bootstrap-INI: liegt immer im App-Ordner, enthält nur den Pfad zur XML-Datei
+		// Bootstrap-INI: liegt immer im App-Ordner; DataFile wird hier verwaltet, weitere Sektionen/Schlüssel bleiben erhalten.
 		private static readonly string BootstrapPath = Path.Combine(
 			AppDomain.CurrentDomain.BaseDirectory,
 			"StockWatcher.ini"
@@ -79,6 +85,10 @@ namespace StockWatcher.Models
 						s.DataRetrievalTimeoutMinutes = Math.Max(0, timeoutMinutes);
 					s.ColumnOrder      = general.Element("ColumnOrder")?.Value ?? "";
 					s.ColumnWidths     = general.Element("ColumnWidths")?.Value ?? "";
+					s.OverviewFilterHolding = ReadBool(general.Element("OverviewFilterHolding"), true);
+					s.OverviewFilterBuyCandidate = ReadBool(general.Element("OverviewFilterBuyCandidate"), true);
+					s.OverviewFilterRealized = ReadBool(general.Element("OverviewFilterRealized"), false);
+					ReadColumnLayouts(general.Element("ColumnLayouts"), s.ColumnLayouts);
 					if (int.TryParse(general.Element("MainWindowLeft")?.Value, out int wl))
 						s.MainWindowLeft = wl;
 					if (int.TryParse(general.Element("MainWindowTop")?.Value, out int wt))
@@ -181,6 +191,10 @@ namespace StockWatcher.Models
 							new XElement("DataRetrievalTimeoutMinutes", DataRetrievalTimeoutMinutes),
 							new XElement("ColumnOrder",      ColumnOrder ?? ""),
 							new XElement("ColumnWidths",     ColumnWidths ?? ""),
+							new XElement("OverviewFilterHolding", OverviewFilterHolding ? "true" : "false"),
+							new XElement("OverviewFilterBuyCandidate", OverviewFilterBuyCandidate ? "true" : "false"),
+							new XElement("OverviewFilterRealized", OverviewFilterRealized ? "true" : "false"),
+							BuildColumnLayoutsElement(),
 							new XElement("MainWindowLeft",   MainWindowWidth > 0 ? MainWindowLeft.ToString() : ""),
 							new XElement("MainWindowTop",    MainWindowHeight > 0 ? MainWindowTop.ToString() : ""),
 							new XElement("MainWindowWidth",  MainWindowWidth > 0 ? MainWindowWidth.ToString() : ""),
@@ -216,6 +230,89 @@ namespace StockWatcher.Models
 				WriteBootstrap(DataFilePath);
 			}
 			catch { /* Kein Absturz bei Schreibfehler */ }
+		}
+
+		private XElement BuildColumnLayoutsElement()
+		{
+			var root = new XElement("ColumnLayouts");
+			string[] tabKeys = { "Overview", "Holding", "BuyCandidate", "Realized" };
+
+			foreach (string tabKey in tabKeys)
+			{
+				var tab = new XElement(tabKey);
+				if (ColumnLayouts.TryGetValue(tabKey, out List<ColumnLayoutItem> items) && items != null)
+				{
+					var ordered = new List<ColumnLayoutItem>(items);
+					ordered.Sort((a, b) => a.Order.CompareTo(b.Order));
+					foreach (ColumnLayoutItem item in ordered)
+					{
+						if (item == null || string.IsNullOrWhiteSpace(item.Id))
+							continue;
+
+						tab.Add(new XElement("Column",
+							new XAttribute("id", item.Id),
+							new XAttribute("visible", item.Visible ? "true" : "false"),
+							new XAttribute("width", Math.Max(30, item.Width)),
+							new XAttribute("order", Math.Max(0, item.Order))));
+					}
+				}
+				root.Add(tab);
+			}
+
+			return root;
+		}
+
+		private static void ReadColumnLayouts(
+			XElement layoutsElement,
+			Dictionary<string, List<ColumnLayoutItem>> target)
+		{
+			if (layoutsElement == null || target == null)
+				return;
+
+			string[] tabKeys = { "Overview", "Holding", "BuyCandidate", "Realized" };
+			foreach (string tabKey in tabKeys)
+			{
+				XElement tab = layoutsElement.Element(tabKey);
+				if (tab == null)
+					continue;
+
+				var items = new List<ColumnLayoutItem>();
+				foreach (XElement column in tab.Elements("Column"))
+				{
+					string id = (column.Attribute("id")?.Value ?? "").Trim();
+					if (string.IsNullOrEmpty(id))
+						continue;
+
+					int width = 100;
+					int order = items.Count;
+					if (int.TryParse(column.Attribute("width")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedWidth))
+						width = parsedWidth;
+					if (int.TryParse(column.Attribute("order")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedOrder))
+						order = parsedOrder;
+
+					items.Add(new ColumnLayoutItem
+					{
+						Id = id,
+						Visible = string.Equals(column.Attribute("visible")?.Value, "true", StringComparison.OrdinalIgnoreCase),
+						Width = Math.Max(30, width),
+						Order = Math.Max(0, order)
+					});
+				}
+
+				if (items.Count > 0)
+					target[tabKey] = items;
+			}
+		}
+
+		private static bool ReadBool(XElement element, bool defaultValue)
+		{
+			if (element == null)
+				return defaultValue;
+
+			if (bool.TryParse(element.Value, out bool value))
+				return value;
+
+			return defaultValue;
 		}
 
 		private XElement BuildWatchlistElement()
@@ -263,7 +360,7 @@ namespace StockWatcher.Models
 		}
 
 		// -----------------------------------------------------------------------
-		// Bootstrap-INI (speichert nur den Pfad zur XML-Datei)
+		// Bootstrap-INI (verwaltet DataFile; weitere lokale Konfiguration bleibt erhalten)
 		// -----------------------------------------------------------------------
 
 		private static string ReadBootstrap()

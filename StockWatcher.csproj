@@ -9,9 +9,11 @@
     <Nullable>disable</Nullable>
     <LangVersion>9.0</LangVersion>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.1.3.1</Version>
-    <AssemblyVersion>1.1.3.1</AssemblyVersion>
-    <FileVersion>1.1.3.1</FileVersion>
+    <NeutralLanguage>en</NeutralLanguage>
+    <Version>1.1.4</Version>
+    <AssemblyVersion>1.1.4.0</AssemblyVersion>
+    <FileVersion>1.1.4.0</FileVersion>
+    <AppConfig>App.config</AppConfig>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,11 +23,45 @@
   <ItemGroup>
     <!-- System.Net.Http ist in .NET Framework 4.8 im GAC, muss aber explizit referenziert werden -->
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.Configuration" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Newtonsoft.Json: zuverlässig für .NET Framework 4.8 ohne Abhängigkeitskonflikte -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
+
+  <!--
+    Unterstützte UI-Kulturen mit Satellite Assemblies.
+    Neue Sprache: Strings.<culture>.resx hinzufügen und hier die Kultur ergänzen.
+  -->
+  <ItemGroup>
+    <StockWatcherUiCulture Include="de" />
+    <StockWatcherUiCulture Include="es" />
+    <StockWatcherUiCulture Include="fr" />
+    <StockWatcherUiCulture Include="it" />
+  </ItemGroup>
+
+  <!--
+    Visual Studio/.NET erzeugt Satellite Assemblies standardmässig unter
+    <Output>\de, \es, ... . Nach jedem Build werden ausschließlich die
+    StockWatcher-Satelliten nach lang\<culture> verschoben.
+
+    App.config setzt CLR probing privatePath="lang", sodass ResourceManager
+    weiterhin die normale Kulturauflösung verwendet.
+  -->
+  <Target Name="MoveStockWatcherSatelliteAssembliesToLang" AfterTargets="Build">
+    <MakeDir Directories="@(StockWatcherUiCulture->'$(TargetDir)lang\%(Identity)')" />
+
+    <Move
+      SourceFiles="@(StockWatcherUiCulture->'$(TargetDir)%(Identity)\$(TargetName).resources.dll')"
+      DestinationFiles="@(StockWatcherUiCulture->'$(TargetDir)lang\%(Identity)\$(TargetName).resources.dll')" />
+
+    <RemoveDir Directories="@(StockWatcherUiCulture->'$(TargetDir)%(Identity)')" />
+  </Target>
+
+  <Target Name="CleanStockWatcherLanguageOutput" AfterTargets="Clean">
+    <RemoveDir Directories="$(TargetDir)lang" Condition="Exists('$(TargetDir)lang')" />
+  </Target>
 
 </Project>

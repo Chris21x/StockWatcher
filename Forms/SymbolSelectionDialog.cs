@@ -1,9 +1,10 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
 using StockWatcher.Services;
+using StockWatcher.Localization;
 
 namespace StockWatcher.Forms
 {
@@ -19,7 +20,7 @@ namespace StockWatcher.Forms
 
 		public SymbolSelectionDialog(string isin, IList<IsinListingCandidate> candidates)
 		{
-			Text = "Handelsplatz auswählen";
+			Text = L10n.Text("SymbolSelectionTitle");
 			Size = new Size(1040, 520);
 			MinimumSize = new Size(760, 380);
 			StartPosition = FormStartPosition.CenterParent;
@@ -30,7 +31,7 @@ namespace StockWatcher.Forms
 			var font = new Font("Segoe UI", 9f);
 			var lbl = new Label
 			{
-				Text = $"Für {isin} wurden mehrere Listings gefunden. Bitte gewünschte Kursquelle auswählen:",
+				Text = L10n.Format("SymbolSelectionPrompt", isin),
 				Location = new Point(12, 12),
 				Size = new Size(1000, 24),
 				Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
@@ -52,12 +53,12 @@ namespace StockWatcher.Forms
 				Font = font,
 				ListViewItemSorter = _sorter
 			};
-			_listView.Columns.Add("Symbol", 105);
-			_listView.Columns.Add("Land", 125);
-			_listView.Columns.Add("Handelsplatz", 165);
-			_listView.Columns.Add("Bezeichnung", 355);
-			_listView.Columns.Add("Aktueller/letzter Preis", 150, HorizontalAlignment.Right);
-			_listView.Columns.Add("Währung", 80);
+			_listView.Columns.Add(L10n.Text("ColumnSymbol"), 105);
+			_listView.Columns.Add(L10n.Text("ColumnCountry"), 125);
+			_listView.Columns.Add(L10n.Text("ColumnExchange"), 165);
+			_listView.Columns.Add(L10n.Text("ColumnDescription"), 355);
+			_listView.Columns.Add(L10n.Text("ColumnCurrentLastPrice"), 150, HorizontalAlignment.Right);
+			_listView.Columns.Add(L10n.Text("ColumnCurrency"), 80);
 			_listView.SelectedIndexChanged += (s, e) => _btnAccept.Enabled = _listView.SelectedItems.Count == 1;
 			_listView.ColumnClick += ListView_ColumnClick;
 			Controls.Add(_listView);
@@ -80,7 +81,7 @@ namespace StockWatcher.Forms
 
 			_btnAccept = new Button
 			{
-				Text = "Übernehmen",
+				Text = L10n.Text("ButtonAccept"),
 				Size = new Size(110, 30),
 				Location = new Point(784, 442),
 				Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
@@ -93,7 +94,7 @@ namespace StockWatcher.Forms
 
 			var btnCancel = new Button
 			{
-				Text = "Abbrechen",
+				Text = L10n.Text("ButtonCancel"),
 				Size = new Size(110, 30),
 				Location = new Point(902, 442),
 				Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
