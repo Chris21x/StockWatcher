@@ -100,7 +100,27 @@ namespace StockWatcher
 			RefreshListView();
 			StartTimers();
 
-			_ = FetchAllQuotesAsync();
+			// Der erste Abruf darf erst starten, wenn das MainForm ein gültiges
+			// Windows-Handle besitzt. Das ist insbesondere beim Tray-only-Start
+			// nicht zwingend bereits während des Konstruktors der Fall.
+			StartInitialFetchWhenHandleReady();
+		}
+
+		private void StartInitialFetchWhenHandleReady()
+		{
+			if (IsHandleCreated)
+			{
+				_ = FetchAllQuotesAsync();
+				return;
+			}
+
+			EventHandler handler = null;
+			handler = (s, e) =>
+			{
+				HandleCreated -= handler;
+				_ = FetchAllQuotesAsync();
+			};
+			HandleCreated += handler;
 		}
 
 		// -----------------------------------------------------------------------
