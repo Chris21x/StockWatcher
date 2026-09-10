@@ -17,13 +17,13 @@ namespace StockWatcher.Forms
 		public AlarmDialog(
 			WatchlistEntry entry,
 			bool isUpperAlarm,
+			string title,
+			string entryTypeText,
 			string limitText,
 			string currentText)
 		{
-			string alarmPrefix = entry.EntryType == WatchlistEntryType.BuyCandidate
-				? L10n.Text("AlarmWatchlist") : L10n.Text("AlarmHolding");
-			Text = $"⚠ {alarmPrefix}";
-			ClientSize = new Size(440, 180);
+			Text = $"⚠ {title}";
+			ClientSize = new Size(540, 205);
 			StartPosition = FormStartPosition.CenterScreen;
 			FormBorderStyle = FormBorderStyle.FixedDialog;
 			MaximizeBox = false;
@@ -34,9 +34,9 @@ namespace StockWatcher.Forms
 
 			_lblInfo = new Label
 			{
-				Text = L10n.Format("AlarmDialogInfo", entry.Name, entry.Isin, currentText, direction, limitText, entry.LastUpdate),
+				Text = L10n.Format("AlarmDialogInfo", entry.Name, entry.Isin, currentText, direction, limitText, entry.LastUpdate, entryTypeText),
 				Location = new Point(16, 16),
-				Size = new Size(400, 100),
+				Size = new Size(508, 125),
 				Font = new Font("Segoe UI", 10f),
 				ForeColor = isUpperAlarm ? Color.DarkGreen : Color.DarkRed
 			};
@@ -44,7 +44,7 @@ namespace StockWatcher.Forms
 			_btnOk = new Button
 			{
 				Text = L10n.Text("ButtonOk"),
-				Location = new Point(184, 132),
+				Location = new Point(284, 157),
 				Size = new Size(90, 32),
 				DialogResult = DialogResult.OK,
 				UseVisualStyleBackColor = true
@@ -53,7 +53,7 @@ namespace StockWatcher.Forms
 			_btnSnooze = new Button
 			{
 				Text = L10n.Text("SnoozeOneCycle"),
-				Location = new Point(284, 132),
+				Location = new Point(384, 157),
 				Size = new Size(140, 32),
 				UseVisualStyleBackColor = true
 			};

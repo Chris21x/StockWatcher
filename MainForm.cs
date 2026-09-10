@@ -108,19 +108,18 @@ namespace StockWatcher
 
 		private void StartInitialFetchWhenHandleReady()
 		{
-			if (IsHandleCreated)
-			{
-				_ = FetchAllQuotesAsync();
-				return;
-			}
+			// Beim Tray-only-Start unterdrückt SetVisibleCore() die erste sichtbare
+			// Anzeige. Dadurch wird das Form-Handle nicht zwingend automatisch
+			// erzeugt und ein nur an HandleCreated gebundener Initialabruf würde
+			// bis zum ersten Öffnen des Fensters warten.
+			//
+			// Der Zugriff auf Handle erzeugt das native Handle bewusst, ohne das
+			// Fenster sichtbar zu machen. Damit funktionieren Initialabruf und
+			// spätere BeginInvoke-Aufrufe auch im reinen Tray-Betrieb.
+			if (!IsHandleCreated)
+				_ = Handle;
 
-			EventHandler handler = null;
-			handler = (s, e) =>
-			{
-				HandleCreated -= handler;
-				_ = FetchAllQuotesAsync();
-			};
-			HandleCreated += handler;
+			_ = FetchAllQuotesAsync();
 		}
 
 		// -----------------------------------------------------------------------
@@ -1204,25 +1203,37 @@ namespace StockWatcher
 
 		private void FireAlarm(WatchlistEntry entry, bool isUpperAlarm, LimitEvaluation evaluation)
 		{
-			string alarmPrefix = entry.EntryType == WatchlistEntryType.BuyCandidate
-				? L10n.Text("AlarmWatchlist") : L10n.Text("AlarmHolding");
+			string title = L10n.Text(isUpperAlarm ? "AlarmTitleUpper" : "AlarmTitleLower");
 			string direction = isUpperAlarm ? L10n.Text("UpperLimitArrow") : L10n.Text("LowerLimitArrow");
+			string entryTypeText = GetEntryTypeText(entry.EntryType);
+			string entryTypeLine = L10n.Format("AlarmEntryTypeLine", entryTypeText);
 			string limitText = FormatAlarmLimit(entry, isUpperAlarm, evaluation);
-			string currentText = FormatPrice(evaluation.CurrentPrice, evaluation.Currency);
+			string currentText = FormatAlarmCurrent(entry, isUpperAlarm, evaluation);
+			string notificationTitle = L10n.Format("TrayBalloonAlarm", title, entry.Name);
+			string notificationBody = L10n.Format("TrayBalloonBody", direction, limitText, currentText);
 
 			if (_settings.NotifyTrayDot)
 				SetTrayDot();
 
 			if (_settings.NotifyBalloon)
-				_notifyIcon.ShowBalloonTip(8000,
-					L10n.Format("TrayBalloonAlarm", alarmPrefix, entry.Name),
-					L10n.Format("TrayBalloonBody", direction, limitText, currentText),
-					isUpperAlarm ? ToolTipIcon.Info : ToolTipIcon.Warning);
+			{
+				// Windows-Toast statt klassischem NotifyIcon-Balloon, damit die
+				// Benachrichtigung im Windows Notification Center erhalten bleibt.
+				// Falls Toast auf dem System nicht verfügbar/registrierbar ist,
+				// bleibt der bisherige Balloon als robuster Fallback bestehen.
+				if (!WindowsToastNotifier.TryShow(notificationTitle, entryTypeLine, notificationBody))
+				{
+					_notifyIcon.ShowBalloonTip(8000,
+						notificationTitle,
+						$"{entryTypeLine}{Environment.NewLine}{notificationBody}",
+						isUpperAlarm ? ToolTipIcon.Info : ToolTipIcon.Warning);
+				}
+			}
 
 			if (_settings.NotifyAlarmDialog)
 				BeginInvoke(new Action(() =>
 				{
-					using (var dlg = new AlarmDialog(entry, isUpperAlarm, limitText, currentText))
+					using (var dlg = new AlarmDialog(entry, isUpperAlarm, title, entryTypeText, limitText, currentText))
 					{
 						dlg.ShowDialog(this);
 
@@ -1240,17 +1251,102 @@ namespace StockWatcher
 				}));
 
 			if (_settings.NtfyEnabled)
-				_ = SendNtfyAsync(entry, isUpperAlarm, limitText, currentText);
+				_ = SendNtfyAsync(entry, isUpperAlarm, title, entryTypeLine, limitText, currentText);
 		}
 
 		private static string FormatAlarmLimit(WatchlistEntry entry, bool isUpperAlarm, LimitEvaluation evaluation)
 		{
 			double rawLimit = isUpperAlarm ? entry.LimitUpper : entry.LimitLower;
 			LimitValueType type = isUpperAlarm ? entry.LimitUpperType : entry.LimitLowerType;
+
 			if (type == LimitValueType.Percent)
 				return $"{FormatSignedPercent(rawLimit)} ({FormatPrice(evaluation.EffectiveLimit, evaluation.Currency)})";
 
-			return FormatPrice(evaluation.EffectiveLimit, evaluation.Currency);
+			string percentText = TryCalculateAlarmPercent(entry, evaluation.EffectiveLimit, evaluation.Currency, out double percent)
+				? FormatSignedPercent(percent)
+				: "–";
+
+			return $"{FormatPrice(evaluation.EffectiveLimit, evaluation.Currency)} ({percentText})";
+		}
+
+		private static string FormatAlarmCurrent(WatchlistEntry entry, bool isUpperAlarm, LimitEvaluation evaluation)
+		{
+			LimitValueType type = isUpperAlarm ? entry.LimitUpperType : entry.LimitLowerType;
+			string priceText = FormatPrice(evaluation.CurrentPrice, evaluation.Currency);
+			string percentText = TryCalculateAlarmPercent(entry, evaluation.CurrentPrice, evaluation.Currency, out double percent)
+				? FormatSignedPercent(percent)
+				: "–";
+
+			return type == LimitValueType.Percent
+				? $"{percentText} ({priceText})"
+				: $"{priceText} ({percentText})";
+		}
+
+		private static bool TryCalculateAlarmPercent(
+			WatchlistEntry entry,
+			double value,
+			string valueCurrency,
+			out double percent)
+		{
+			percent = 0.0;
+			if (entry == null || entry.ReferencePrice <= 0 || value <= 0)
+				return false;
+
+			if (!TryGetReferencePriceInAlarmCurrency(entry, valueCurrency, out double referencePrice) ||
+				referencePrice <= 0)
+				return false;
+
+			percent = (value / referencePrice - 1.0) * 100.0;
+			return true;
+		}
+
+		private static bool TryGetReferencePriceInAlarmCurrency(
+			WatchlistEntry entry,
+			string targetCurrency,
+			out double referencePrice)
+		{
+			referencePrice = 0.0;
+			if (entry == null || entry.ReferencePrice <= 0)
+				return false;
+
+			string referenceCurrency = entry.EffectiveReferenceCurrency;
+			targetCurrency = (targetCurrency ?? "").Trim().ToUpperInvariant();
+			if (string.IsNullOrEmpty(targetCurrency))
+				return false;
+
+			if (string.Equals(referenceCurrency, targetCurrency, StringComparison.OrdinalIgnoreCase))
+			{
+				referencePrice = entry.ReferencePrice;
+				return true;
+			}
+
+			double referenceFxToEur = entry.EffectiveReferenceFxRate;
+			if (referenceFxToEur <= 0)
+				return false;
+
+			double referencePriceEur = entry.ReferencePrice * referenceFxToEur;
+			if (string.Equals(targetCurrency, "EUR", StringComparison.OrdinalIgnoreCase))
+			{
+				referencePrice = referencePriceEur;
+				return referencePrice > 0;
+			}
+
+			// Für absolute Limits in Listingwährung reicht der bereits mit dem
+			// aktuellen Kurs gespeicherte QuoteCurrency→EUR-Faktor. Kein zusätzlicher
+			// Netzwerkabruf nur für die Benachrichtigung.
+			string quoteCurrency = (entry.QuoteCurrency ?? "").Trim().ToUpperInvariant();
+			if (string.Equals(targetCurrency, quoteCurrency, StringComparison.OrdinalIgnoreCase) &&
+				entry.LastPrice > 0 && entry.LastPriceEur > 0)
+			{
+				double quoteFxToEur = entry.LastPriceEur / entry.LastPrice;
+				if (quoteFxToEur > 0)
+				{
+					referencePrice = referencePriceEur / quoteFxToEur;
+					return referencePrice > 0;
+				}
+			}
+
+			return false;
 		}
 
 		private static double NormalizeTwoDecimalDisplay(double value) =>
@@ -1271,6 +1367,8 @@ namespace StockWatcher
 		private async Task SendNtfyAsync(
 			WatchlistEntry entry,
 			bool isUpperAlarm,
+			string title,
+			string entryTypeLine,
 			string limitText,
 			string currentText)
 		{
@@ -1280,16 +1378,14 @@ namespace StockWatcher
 
 			try
 			{
-				string alarmPrefix = entry.EntryType == WatchlistEntryType.BuyCandidate
-					? L10n.Text("AlarmWatchlist") : L10n.Text("AlarmHolding");
 				string direction = isUpperAlarm ? L10n.Text("UpperLimitArrow") : L10n.Text("LowerLimitArrow");
 
 				// ntfy: Titel bewusst als echter Titelparameter übertragen.
 				// Uri.EscapeDataString gehört in die URL, nicht in den HTTP-Header;
 				// so zeigt ntfy Leerzeichen/Umlaute korrekt statt als %20/%C3... an.
-				string title = $"{alarmPrefix}: {entry.Name}";
-				string body = L10n.Format("AlarmReached", direction, limitText, currentText);
-				string requestUrl = $"{url}/{topic}?title={Uri.EscapeDataString(title)}&priority=high";
+				string notificationTitle = L10n.Format("TrayBalloonAlarm", title, entry.Name);
+				string body = $"{entryTypeLine}{Environment.NewLine}{L10n.Format("AlarmReached", direction, limitText, currentText)}";
+				string requestUrl = $"{url}/{topic}?title={Uri.EscapeDataString(notificationTitle)}&priority=high";
 
 				var req = new System.Net.Http.HttpRequestMessage(
 					System.Net.Http.HttpMethod.Post, requestUrl);
@@ -1680,7 +1776,7 @@ namespace StockWatcher
 			{
 				e.Cancel = true;
 				Hide();
-				_notifyIcon.ShowBalloonTip(2000, L10n.Text("AppTitle"),
+				_notifyIcon.ShowBalloonTip(1000, L10n.Text("AppTitle"),
 					L10n.Text("TrayBackground"), ToolTipIcon.Info);
 			}
 		}

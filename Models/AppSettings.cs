@@ -32,7 +32,7 @@ namespace StockWatcher.Models
 		public string DataFilePath { get; set; }
 
 		// ---- Benachrichtigungsoptionen (lokal) ----
-		/// <summary>Balloon-Tipp im Tray bei Kurs-Alarm anzeigen.</summary>
+		/// <summary>Windows-Benachrichtigung (Toast; Balloon-Fallback) bei Limit-Erreichung anzeigen.</summary>
 		public bool NotifyBalloon     { get; set; } = true;
 		/// <summary>AlarmDialog (modales Fenster) bei Kurs-Alarm anzeigen.</summary>
 		public bool NotifyAlarmDialog { get; set; } = true;
