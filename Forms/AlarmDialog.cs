@@ -8,7 +8,6 @@ namespace StockWatcher.Forms
 {
 	public class AlarmDialog : Form
 	{
-		private Label _lblInfo;
 		private Button _btnOk;
 		private Button _btnSnooze;
 
@@ -17,57 +16,95 @@ namespace StockWatcher.Forms
 		public AlarmDialog(
 			WatchlistEntry entry,
 			bool isUpperAlarm,
-			string title,
-			string entryTypeText,
+			string dialogTitle,
 			string limitText,
 			string currentText)
 		{
-			Text = $"⚠ {title}";
-			ClientSize = new Size(540, 205);
+			Text = dialogTitle;
+			ClientSize = new Size(540, 250);
 			StartPosition = FormStartPosition.CenterScreen;
 			FormBorderStyle = FormBorderStyle.FixedDialog;
 			MaximizeBox = false;
 			MinimizeBox = false;
-			TopMost = true;
+			TopMost = false;
 
-			string direction = isUpperAlarm ? L10n.Text("UpperLimit") : L10n.Text("LowerLimit");
+			Color alarmColor = isUpperAlarm ? Color.DarkGreen : Color.DarkRed;
+			var normalFont = new Font("Segoe UI", 10f);
+			var boldFont = new Font("Segoe UI", 10f, FontStyle.Bold);
 
-			_lblInfo = new Label
-			{
-				Text = L10n.Format("AlarmDialogInfo", entry.Name, entry.Isin, currentText, direction, limitText, entry.LastUpdate, entryTypeText),
-				Location = new Point(16, 16),
-				Size = new Size(508, 125),
-				Font = new Font("Segoe UI", 10f),
-				ForeColor = isUpperAlarm ? Color.DarkGreen : Color.DarkRed
-			};
+			string securityLine = L10n.Format("AlarmDialogSecurity", entry.Name, entry.Isin);
+			string limitLine = L10n.Format(
+				isUpperAlarm ? "AlarmDialogLimitUpper" : "AlarmDialogLimitLower",
+				limitText);
+			string currentLine = L10n.Format("AlarmDialogCurrent", currentText);
+			string asOfLine = L10n.Format("AlarmDialogAsOf", entry.LastUpdate);
+
+			Controls.Add(MakeLabel(
+				dialogTitle,
+				16, 16, 508, 22, boldFont, alarmColor));
+
+			// Sachlicher Titel, danach bewusst eine Leerzeile vor dem Wertpapier.
+			Controls.Add(MakeLabel(
+				securityLine,
+				16, 52, 508, 22, normalFont, alarmColor));
+
+			Controls.Add(MakeLabel(
+				limitLine,
+				16, 82, 508, 22, normalFont, alarmColor));
+
+			Controls.Add(MakeLabel(
+				currentLine,
+				16, 104, 508, 22, normalFont, alarmColor));
+
+			Controls.Add(MakeLabel(
+				asOfLine,
+				16, 148, 508, 22, normalFont, alarmColor));
 
 			_btnOk = new Button
 			{
 				Text = L10n.Text("ButtonOk"),
-				Location = new Point(284, 157),
+				Location = new Point(284, 205),
 				Size = new Size(90, 32),
-				DialogResult = DialogResult.OK,
 				UseVisualStyleBackColor = true
 			};
+			_btnOk.Click += (s, e) => Close();
 
 			_btnSnooze = new Button
 			{
 				Text = L10n.Text("SnoozeOneCycle"),
-				Location = new Point(384, 157),
+				Location = new Point(384, 205),
 				Size = new Size(140, 32),
 				UseVisualStyleBackColor = true
 			};
 			_btnSnooze.Click += (s, e) =>
 			{
 				Snoozed = true;
-				DialogResult = DialogResult.Cancel;
 				Close();
 			};
 
-			Controls.Add(_lblInfo);
 			Controls.Add(_btnOk);
 			Controls.Add(_btnSnooze);
 			AcceptButton = _btnOk;
+		}
+
+		private static Label MakeLabel(
+			string text,
+			int x,
+			int y,
+			int width,
+			int height,
+			Font font,
+			Color color)
+		{
+			return new Label
+			{
+				Text = text ?? "",
+				Location = new Point(x, y),
+				Size = new Size(width, height),
+				Font = font,
+				ForeColor = color,
+				AutoEllipsis = true
+			};
 		}
 	}
 }

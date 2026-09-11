@@ -8,6 +8,8 @@ using System.IO;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -50,6 +52,10 @@ namespace StockWatcher
 		private ContextMenuStrip _columnHeaderContextMenu;
 		private Button _btnColumnChooser;
 		private int _columnHeaderContextIndex = -1;
+		private ListViewItem _contextListViewItem;
+		private int _contextCellColumnIndex = -1;
+		private Image _selectAllToolbarImage;
+		private bool _shutdownNotificationSent;
 
 		// Sortierung
 		private readonly ListViewSorter _sorter = new ListViewSorter();
@@ -99,6 +105,7 @@ namespace StockWatcher
 			BuildTrayIcon();
 			RefreshListView();
 			StartTimers();
+			PublishApplicationActiveStatus();
 
 			// Der erste Abruf darf erst starten, wenn das MainForm ein gültiges
 			// Windows-Handle besitzt. Das ist insbesondere beim Tray-only-Start
@@ -140,7 +147,7 @@ namespace StockWatcher
 			miRefresh.ShortcutKeys = Keys.F5;
 			var miSettings = new ToolStripMenuItem(L10n.Text("MenuSettings"), null, OpenSettings);
 			miSettings.ShortcutKeys = Keys.Control | Keys.E;
-			var miExit = new ToolStripMenuItem(L10n.Text("MenuExit"), null, (s, e) => Application.Exit());
+			var miExit = new ToolStripMenuItem(L10n.Text("MenuExit"), null, (s, e) => ExitApplication());
 			menuAction.DropDownItems.AddRange(new ToolStripItem[]
 				{ miRefresh, miSettings, new ToolStripSeparator(), miExit });
 			menuStrip.Items.Add(menuAction);
@@ -182,6 +189,18 @@ namespace StockWatcher
 			_toolStrip.Items.Add(btnAdd);
 			_toolStrip.Items.Add(btnEdit);
 			_toolStrip.Items.Add(btnRemove);
+			_toolStrip.Items.Add(new ToolStripSeparator());
+
+			_selectAllToolbarImage = CreateSelectAllToolbarImage();
+			var btnSelectAll = new ToolStripButton(L10n.Text("ToolbarSelectAll"))
+			{
+				DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
+				Image = _selectAllToolbarImage,
+				TextImageRelation = TextImageRelation.ImageBeforeText,
+				ToolTipText = L10n.Text("TipSelectAll")
+			};
+			btnSelectAll.Click += (s, e) => SelectAllVisibleRows();
+			_toolStrip.Items.Add(btnSelectAll);
 
 			// ListView
 			_listView = new ColumnSelectableListView
@@ -189,7 +208,7 @@ namespace StockWatcher
 				Dock = DockStyle.Fill,
 				View = View.Details,
 				FullRowSelect = true,
-				MultiSelect = false,
+				MultiSelect = true,
 				GridLines = true,
 				Font = new Font("Consolas", 9.5f),
 				AllowColumnReorder = true
@@ -198,6 +217,7 @@ namespace StockWatcher
 			_listView.ListViewItemSorter = _sorter;
 			_listView.DoubleClick += (s, e) => OpenEditDialog();
 			_listView.ColumnClick += ListView_ColumnClick;
+			_listView.KeyDown += ListView_KeyDown;
 			_listView.MouseDown += ListView_MouseDown;
 			_listView.ColumnHeaderRightClicked += ListView_ColumnHeaderRightClicked;
 			BuildEntryContextMenu();
@@ -344,6 +364,20 @@ namespace StockWatcher
 			RefreshListView();
 		}
 
+		private static Image CreateSelectAllToolbarImage()
+		{
+			var bitmap = new Bitmap(16, 16);
+			using (Graphics graphics = Graphics.FromImage(bitmap))
+			using (var pen = new Pen(SystemColors.ControlText, 1.4f))
+			{
+				graphics.Clear(Color.Transparent);
+				graphics.DrawRectangle(pen, 2, 2, 11, 11);
+				graphics.DrawLine(pen, 4, 8, 7, 11);
+				graphics.DrawLine(pen, 7, 11, 12, 5);
+			}
+			return bitmap;
+		}
+
 		private void ConfigureColumnsForSelectedTab()
 		{
 			ConfigureColumnsForSelectedTabCore();
@@ -353,38 +387,256 @@ namespace StockWatcher
 		private void BuildEntryContextMenu()
 		{
 			_entryContextMenu = new ContextMenuStrip();
-			_entryContextMenu.Items.Add(L10n.Text("EntryMenuReload"), null,
+
+			var reload = new ToolStripMenuItem(
+				L10n.Text("EntryMenuReload"),
+				null,
 				(s, e) => RefreshSelectedEntry());
-			_entryContextMenu.Items.Add(new ToolStripSeparator());
-			_entryContextMenu.Items.Add(L10n.Text("EntryMenuCopyHolding"), null,
+			var copyHolding = new ToolStripMenuItem(
+				L10n.Text("EntryMenuCopyHolding"),
+				null,
 				(s, e) => CopySelectedEntry(WatchlistEntryType.Holding));
-			_entryContextMenu.Items.Add(L10n.Text("EntryMenuCopyWatchlist"), null,
+			var copyWatchlist = new ToolStripMenuItem(
+				L10n.Text("EntryMenuCopyWatchlist"),
+				null,
 				(s, e) => CopySelectedEntry(WatchlistEntryType.BuyCandidate));
-			_entryContextMenu.Items.Add(L10n.Text("EntryMenuCopyRealized"), null,
+			var copyRealized = new ToolStripMenuItem(
+				L10n.Text("EntryMenuCopyRealized"),
+				null,
 				(s, e) => CopySelectedEntry(WatchlistEntryType.Realized));
+			var copyRow = new ToolStripMenuItem(
+				L10n.Text("EntryMenuCopyRow"),
+				null,
+				(s, e) => CopyContextRowToClipboard());
+			var copy = new ToolStripMenuItem(
+				L10n.Text("EntryMenuCopy"),
+				null,
+				(s, e) => CopyContextSelectionToClipboard());
+
+			_entryContextMenu.Items.Add(reload);
+			_entryContextMenu.Items.Add(new ToolStripSeparator());
+			_entryContextMenu.Items.Add(copyHolding);
+			_entryContextMenu.Items.Add(copyWatchlist);
+			_entryContextMenu.Items.Add(copyRealized);
+			_entryContextMenu.Items.Add(new ToolStripSeparator());
+			_entryContextMenu.Items.Add(copyRow);
+			_entryContextMenu.Items.Add(copy);
+
 			_entryContextMenu.Opening += (s, e) =>
 			{
-				if (_listView.SelectedItems.Count == 0)
+				bool hasSelection = _listView.SelectedItems.Count > 0;
+				bool singleSelection = _listView.SelectedItems.Count == 1;
+
+				if (!hasSelection)
+				{
 					e.Cancel = true;
+					return;
+				}
+
+				reload.Enabled = singleSelection;
+				copyHolding.Enabled = singleSelection;
+				copyWatchlist.Enabled = singleSelection;
+				copyRealized.Enabled = singleSelection;
+				copyRow.Enabled = _contextListViewItem != null;
+				copy.Enabled =
+					_listView.SelectedItems.Count > 1 ||
+					(_contextListViewItem != null && _contextCellColumnIndex >= 0);
 			};
 
 			_listView.ContextMenuStrip = _entryContextMenu;
+		}
+
+		private void ListView_KeyDown(object sender, KeyEventArgs e)
+		{
+			if (!e.Control || e.KeyCode != Keys.A)
+				return;
+
+			SelectAllVisibleRows();
+			e.Handled = true;
+			e.SuppressKeyPress = true;
+		}
+
+		private void SelectAllVisibleRows()
+		{
+			if (_listView == null || _listView.Items.Count == 0)
+				return;
+
+			_listView.BeginUpdate();
+			try
+			{
+				foreach (ListViewItem item in _listView.Items)
+					item.Selected = true;
+			}
+			finally
+			{
+				_listView.EndUpdate();
+			}
+
+			_listView.Items[0].Focused = true;
+			_listView.Focus();
 		}
 
 		private void ListView_MouseDown(object sender, MouseEventArgs e)
 		{
 			if (e.Button != MouseButtons.Right) return;
 
-			ListViewItem item = _listView.GetItemAt(e.X, e.Y);
+			ListViewHitTestInfo hit = _listView.HitTest(e.Location);
+			ListViewItem item = hit.Item;
+
+			_contextListViewItem = item;
+			_contextCellColumnIndex =
+				item != null && hit.SubItem != null
+					? item.SubItems.IndexOf(hit.SubItem)
+					: -1;
+
 			if (item == null)
 			{
-				if (_listView.SelectedItems.Count > 0)
-					_listView.SelectedItems[0].Selected = false;
+				ClearListViewSelection();
 				return;
 			}
 
-			item.Selected = true;
+			// Rechtsklick auf eine bereits markierte Zeile erhält eine bestehende
+			// Mehrfachauswahl. Rechtsklick auf eine andere Zeile setzt die Auswahl
+			// dagegen wie üblich auf genau diese Zeile.
+			if (!item.Selected)
+			{
+				ClearListViewSelection();
+				item.Selected = true;
+			}
+
 			item.Focused = true;
+		}
+
+		private void ClearListViewSelection()
+		{
+			foreach (ListViewItem item in _listView.Items)
+				item.Selected = false;
+		}
+
+		private void CopyContextSelectionToClipboard()
+		{
+			if (_listView.SelectedItems.Count == 0)
+				return;
+
+			if (_listView.SelectedItems.Count > 1)
+			{
+				CopySelectedRowsToClipboard();
+				return;
+			}
+
+			ListViewItem item = _contextListViewItem ?? _listView.SelectedItems[0];
+			int columnIndex = _contextCellColumnIndex;
+			if (item == null || columnIndex < 0 || columnIndex >= item.SubItems.Count)
+				return;
+
+			SetClipboardTextSafe(
+				NormalizeClipboardCell(item.SubItems[columnIndex].Text));
+		}
+
+		private void CopyContextRowToClipboard()
+		{
+			if (_contextListViewItem == null)
+				return;
+
+			CopyRowsToClipboard(new[] { _contextListViewItem });
+		}
+
+		private void CopySelectedRowsToClipboard()
+		{
+			var selectedRows = new List<ListViewItem>();
+			foreach (ListViewItem item in _listView.Items)
+			{
+				if (item.Selected)
+					selectedRows.Add(item);
+			}
+
+			CopyRowsToClipboard(selectedRows);
+		}
+
+		private void CopyRowsToClipboard(IEnumerable<ListViewItem> rows)
+		{
+			var rowList = new List<ListViewItem>(rows);
+			if (rowList.Count == 0)
+				return;
+
+			var visibleColumns = new List<ColumnHeader>();
+			foreach (ColumnHeader header in _listView.Columns)
+				visibleColumns.Add(header);
+			visibleColumns.Sort((a, b) => a.DisplayIndex.CompareTo(b.DisplayIndex));
+
+			var text = new StringBuilder();
+
+			AppendClipboardTsvRow(
+				text,
+				visibleColumns.ConvertAll(header => NormalizeClipboardCell(header.Text)));
+
+			foreach (ListViewItem item in rowList)
+			{
+				var values = new List<string>(visibleColumns.Count);
+				foreach (ColumnHeader header in visibleColumns)
+				{
+					string value =
+						header.Index >= 0 && header.Index < item.SubItems.Count
+							? item.SubItems[header.Index].Text
+							: "";
+					values.Add(NormalizeClipboardCell(value));
+				}
+
+				AppendClipboardTsvRow(text, values);
+			}
+
+			SetClipboardTextSafe(
+				text.ToString().TrimEnd('\r', '\n'));
+		}
+
+		private void SetClipboardTextSafe(string text)
+		{
+			var data = new DataObject();
+			data.SetData(DataFormats.UnicodeText, false, text ?? "");
+			data.SetData(DataFormats.Text, false, text ?? "");
+
+			try
+			{
+				// CLIPBRD_E_CANT_OPEN (0x800401D0) tritt auf, wenn ein anderer
+				// Prozess die Windows-Zwischenablage gerade exklusiv geöffnet hat.
+				// WinForms kann den Vorgang selbst wiederholen; 20 x 100 ms geben
+				// kurzlebigen Clipboard-Locks genügend Zeit, ohne die Anwendung
+				// bei einem dauerhaften Lock hängen zu lassen.
+				Clipboard.SetDataObject(
+					data,
+					copy: true,
+					retryTimes: 20,
+					retryDelay: 100);
+			}
+			catch (ExternalException)
+			{
+				MessageBox.Show(
+					this,
+					L10n.Text("ClipboardUnavailable"),
+					L10n.Text("AppTitle"),
+					MessageBoxButtons.OK,
+					MessageBoxIcon.Information);
+			}
+		}
+
+		private static void AppendClipboardTsvRow(StringBuilder target, IList<string> values)
+		{
+			for (int i = 0; i < values.Count; i++)
+			{
+				if (i > 0)
+					target.Append('\t');
+				target.Append(values[i] ?? "");
+			}
+			target.AppendLine();
+		}
+
+		private static string NormalizeClipboardCell(string value)
+		{
+			return (value ?? "")
+				.Replace('\t', ' ')
+				.Replace("\r\n", " ")
+				.Replace('\r', ' ')
+				.Replace('\n', ' ');
 		}
 
 		private void RefreshSelectedEntry()
@@ -468,7 +720,7 @@ namespace StockWatcher
 			_trayMenu.Items.Add(L10n.Text("TrayShowApp"), null, (s, e) => ShowMainWindow());
 			_trayMenu.Items.Add(L10n.Text("MenuRefreshNow"), null, (s, e) => _ = FetchAllQuotesAsync());
 			_trayMenu.Items.Add(new ToolStripSeparator());
-			_trayMenu.Items.Add(L10n.Text("MenuExit"), null, (s, e) => Application.Exit());
+			_trayMenu.Items.Add(L10n.Text("MenuExit"), null, (s, e) => ExitApplication());
 
 			_notifyIcon = new NotifyIcon
 			{
@@ -1018,6 +1270,11 @@ namespace StockWatcher
 			{
 				if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Result != null)
 				{
+					// Vor Änderungen eventuell vorhandene History-Einträge mit der
+					// bisherigen Positionsidentität entfernen.
+					RemoveAlarmToast(entry, true);
+					RemoveAlarmToast(entry, false);
+
 					// Persistierbare Felder aktualisieren, Laufzeitdaten behalten
 					entry.Isin             = dlg.Result.Isin;
 					entry.Name             = dlg.Result.Name;
@@ -1043,6 +1300,18 @@ namespace StockWatcher
 					entry.SaleDate          = dlg.Result.SaleDate;
 					entry.SaleFxRate        = dlg.Result.SaleFxRate;
 
+					if (!entry.LimitUpperEnabled)
+					{
+						entry.UpperLimitReached = false;
+						entry.AlarmUpperFired = false;
+					}
+
+					if (!entry.LimitLowerEnabled)
+					{
+						entry.LowerLimitReached = false;
+						entry.AlarmLowerFired = false;
+					}
+
 					if (entry.EntryType == WatchlistEntryType.Realized)
 					{
 						entry.UpperLimitReached = false;
@@ -1065,6 +1334,8 @@ namespace StockWatcher
 			if (MessageBox.Show(L10n.Format("RemoveConfirm", entry.Name),
 					L10n.Text("ConfirmTitle"), MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
 			{
+				RemoveAlarmToast(entry, true);
+				RemoveAlarmToast(entry, false);
 				_settings.Watchlist.Remove(entry);
 				_priceTrendIndicators.Remove(entry);
 				_priceTrendDirections.Remove(entry);
@@ -1088,7 +1359,16 @@ namespace StockWatcher
 
 		private async Task CheckLimitsAsync(WatchlistEntry entry, CancellationToken cancellationToken)
 		{
-			if (entry.EntryType == WatchlistEntryType.Realized) return;
+			if (entry.EntryType == WatchlistEntryType.Realized)
+			{
+				RemoveAlarmToast(entry, true);
+				RemoveAlarmToast(entry, false);
+				entry.UpperLimitReached = false;
+				entry.LowerLimitReached = false;
+				entry.AlarmUpperFired = false;
+				entry.AlarmLowerFired = false;
+				return;
+			}
 
 			bool needsReferencePrice =
 				(entry.LimitUpperEnabled && entry.LimitUpperType == LimitValueType.Percent) ||
@@ -1112,9 +1392,14 @@ namespace StockWatcher
 					entry.AlarmUpperFired = true;
 					FireAlarm(entry, true, upper);
 				}
+				else
+				{
+					RefreshAlarmToast(entry, true, upper);
+				}
 			}
 			else
 			{
+				RemoveAlarmToast(entry, true);
 				entry.AlarmUpperFired = false;
 			}
 
@@ -1125,9 +1410,14 @@ namespace StockWatcher
 					entry.AlarmLowerFired = true;
 					FireAlarm(entry, false, lower);
 				}
+				else
+				{
+					RefreshAlarmToast(entry, false, lower);
+				}
 			}
 			else
 			{
+				RemoveAlarmToast(entry, false);
 				entry.AlarmLowerFired = false;
 			}
 		}
@@ -1203,40 +1493,76 @@ namespace StockWatcher
 
 		private void FireAlarm(WatchlistEntry entry, bool isUpperAlarm, LimitEvaluation evaluation)
 		{
-			string title = L10n.Text(isUpperAlarm ? "AlarmTitleUpper" : "AlarmTitleLower");
-			string direction = isUpperAlarm ? L10n.Text("UpperLimitArrow") : L10n.Text("LowerLimitArrow");
 			string entryTypeText = GetEntryTypeText(entry.EntryType);
-			string entryTypeLine = L10n.Format("AlarmEntryTypeLine", entryTypeText);
 			string limitText = FormatAlarmLimit(entry, isUpperAlarm, evaluation);
 			string currentText = FormatAlarmCurrent(entry, isUpperAlarm, evaluation);
-			string notificationTitle = L10n.Format("TrayBalloonAlarm", title, entry.Name);
-			string notificationBody = L10n.Format("TrayBalloonBody", direction, limitText, currentText);
 
 			if (_settings.NotifyTrayDot)
 				SetTrayDot();
 
 			if (_settings.NotifyBalloon)
 			{
-				// Windows-Toast statt klassischem NotifyIcon-Balloon, damit die
-				// Benachrichtigung im Windows Notification Center erhalten bleibt.
-				// Falls Toast auf dem System nicht verfügbar/registrierbar ist,
-				// bleibt der bisherige Balloon als robuster Fallback bestehen.
-				if (!WindowsToastNotifier.TryShow(notificationTitle, entryTypeLine, notificationBody))
+				string toastTitle = L10n.Format(
+					isUpperAlarm ? "AlarmToastTitleUpper" : "AlarmToastTitleLower",
+					entryTypeText);
+				string toastSecurity = L10n.Format("AlarmToastSecurity", entry.Name, entry.Isin);
+				string toastLimit = L10n.Format(
+					isUpperAlarm ? "AlarmToastLimitUpper" : "AlarmToastLimitLower",
+					limitText);
+				string toastCurrent = L10n.Format("AlarmToastCurrent", currentText);
+
+				string eventTitle = L10n.Format(
+					isUpperAlarm ? "AlarmEventTitleUpper" : "AlarmEventTitleLower",
+					entryTypeText);
+				string eventSecurity = L10n.Format("AlarmEventSecurity", entry.Name, entry.Isin);
+				string eventDetails = L10n.Format(
+					isUpperAlarm ? "AlarmEventDetailsUpper" : "AlarmEventDetailsLower",
+					limitText,
+					currentText);
+
+				// Popup und Ereignis haben absichtlich getrennte Inhalte:
+				// - Popup: bekannte mehrzeilige ToastText02-Darstellung
+				// - Ereignis: robuste 3-Block-Darstellung, Limit + Ist in einem
+				//   Detailblock. Nach Dismissed ersetzt der Ereignistext dasselbe Tag.
+				if (!WindowsToastNotifier.TryShowLimitPopup(
+					GetAlarmToastTag(entry, isUpperAlarm),
+					toastTitle,
+					toastSecurity,
+					toastLimit,
+					toastCurrent,
+					eventTitle,
+					eventSecurity,
+					eventDetails))
 				{
-					_notifyIcon.ShowBalloonTip(8000,
-						notificationTitle,
-						$"{entryTypeLine}{Environment.NewLine}{notificationBody}",
+					string toastBody =
+						$"{toastSecurity}{Environment.NewLine}{Environment.NewLine}" +
+						$"{toastLimit}{Environment.NewLine}{toastCurrent}";
+
+					_notifyIcon.ShowBalloonTip(
+						8000,
+						toastTitle,
+						toastBody,
 						isUpperAlarm ? ToolTipIcon.Info : ToolTipIcon.Warning);
 				}
 			}
 
 			if (_settings.NotifyAlarmDialog)
+			{
+				string dialogTitle = L10n.Format(
+					isUpperAlarm ? "AlarmDialogTitleUpper" : "AlarmDialogTitleLower",
+					entryTypeText);
+
 				BeginInvoke(new Action(() =>
 				{
-					using (var dlg = new AlarmDialog(entry, isUpperAlarm, title, entryTypeText, limitText, currentText))
-					{
-						dlg.ShowDialog(this);
+					var dlg = new AlarmDialog(
+						entry,
+						isUpperAlarm,
+						dialogTitle,
+						limitText,
+						currentText);
 
+					dlg.FormClosed += (s, e) =>
+					{
 						// Snooze (1 Zyklus): Alarm wieder scharf schalten, damit er beim
 						// nächsten erfolgreichen Abruf erneut auslöst, falls das Limit
 						// weiterhin verletzt ist.
@@ -1247,11 +1573,107 @@ namespace StockWatcher
 							else
 								entry.AlarmLowerFired = false;
 						}
-					}
+
+						dlg.Dispose();
+					};
+
+					// Bewusst nicht modal. OK/Snooze schliessen den jeweiligen Dialog
+					// explizit; mehrere Alarme blockieren sich dadurch nicht gegenseitig.
+					dlg.Show();
 				}));
+			}
 
 			if (_settings.NtfyEnabled)
-				_ = SendNtfyAsync(entry, isUpperAlarm, title, entryTypeLine, limitText, currentText);
+			{
+				string ntfyTitle = L10n.Format(
+					isUpperAlarm ? "AlarmNtfyTitleUpper" : "AlarmNtfyTitleLower",
+					entryTypeText);
+				string ntfySecurity = L10n.Format("AlarmNtfySecurity", entry.Name, entry.Isin);
+				string ntfyLimit = L10n.Format(
+					isUpperAlarm ? "AlarmNtfyLimitUpper" : "AlarmNtfyLimitLower",
+					limitText);
+				string ntfyCurrent = L10n.Format("AlarmNtfyCurrent", currentText);
+
+				_ = SendNtfyAsync(
+					ntfyTitle,
+					ntfySecurity,
+					ntfyLimit,
+					ntfyCurrent);
+			}
+		}
+
+		private void RefreshAlarmToast(
+			WatchlistEntry entry,
+			bool isUpperAlarm,
+			LimitEvaluation evaluation)
+		{
+			if (!_settings.NotifyBalloon)
+			{
+				RemoveAlarmToast(entry, isUpperAlarm);
+				return;
+			}
+
+			string entryTypeText = GetEntryTypeText(entry.EntryType);
+			string limitText = FormatAlarmLimit(entry, isUpperAlarm, evaluation);
+			string currentText = FormatAlarmCurrent(entry, isUpperAlarm, evaluation);
+
+			string eventTitle = L10n.Format(
+				isUpperAlarm ? "AlarmEventTitleUpper" : "AlarmEventTitleLower",
+				entryTypeText);
+			string eventSecurity = L10n.Format("AlarmEventSecurity", entry.Name, entry.Isin);
+			string eventDetails = L10n.Format(
+				isUpperAlarm ? "AlarmEventDetailsUpper" : "AlarmEventDetailsLower",
+				limitText,
+				currentText);
+
+			// Nur Ereignis aktualisieren: kein Popup, kein Dialog, kein ntfy.
+			WindowsToastNotifier.TryRefreshLimitEvent(
+				GetAlarmToastTag(entry, isUpperAlarm),
+				eventTitle,
+				eventSecurity,
+				eventDetails);
+		}
+
+		private static void RemoveAlarmToast(WatchlistEntry entry, bool isUpperAlarm)
+		{
+			if (entry == null) return;
+			WindowsToastNotifier.TryRemoveLimit(GetAlarmToastTag(entry, isUpperAlarm));
+		}
+
+		private static string GetAlarmToastTag(WatchlistEntry entry, bool isUpperAlarm)
+		{
+			string identity = string.Join("|",
+				((int)entry.EntryType).ToString(CultureInfo.InvariantCulture),
+				(entry.Isin ?? "").Trim().ToUpperInvariant(),
+				entry.ReferenceDate.Ticks.ToString(CultureInfo.InvariantCulture),
+				entry.ReferencePrice.ToString("R", CultureInfo.InvariantCulture),
+				isUpperAlarm ? "U" : "L");
+
+			using (SHA256 sha256 = SHA256.Create())
+			{
+				byte[] hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(identity));
+				var tag = new StringBuilder(16);
+				for (int i = 0; i < 8; i++)
+					tag.Append(hash[i].ToString("x2", CultureInfo.InvariantCulture));
+				return tag.ToString();
+			}
+		}
+
+		private static HashSet<string> GetAlarmToastTags(IEnumerable<WatchlistEntry> entries)
+		{
+			var tags = new HashSet<string>(StringComparer.Ordinal);
+			if (entries == null) return tags;
+
+			foreach (WatchlistEntry entry in entries)
+			{
+				if (entry == null || entry.EntryType == WatchlistEntryType.Realized)
+					continue;
+
+				tags.Add(GetAlarmToastTag(entry, true));
+				tags.Add(GetAlarmToastTag(entry, false));
+			}
+
+			return tags;
 		}
 
 		private static string FormatAlarmLimit(WatchlistEntry entry, bool isUpperAlarm, LimitEvaluation evaluation)
@@ -1364,13 +1786,93 @@ namespace StockWatcher
 			return string.IsNullOrEmpty(ccy) ? $"{value:N2}" : $"{value:N2} {ccy}";
 		}
 
+		private void PublishApplicationActiveStatus()
+		{
+			// Nach einem ungeplanten vorherigen Ende keine veralteten Alarme oder
+			// einen alten Status bis zum ersten Kursabruf stehen lassen.
+			WindowsToastNotifier.TryClearLimits();
+			WindowsToastNotifier.TryRemoveStatus();
+
+			string eventMessage = L10n.Text("AppEventActive");
+			if (_settings.NotifyBalloon)
+				WindowsToastNotifier.TryShowStatus(L10n.Text("AppTitle"), eventMessage);
+
+			if (_settings.NtfyEnabled)
+				_ = SendNtfyStatusAsync(L10n.Text("AppNtfyActive"), CancellationToken.None);
+		}
+
+		private void PublishApplicationInactiveStatus()
+		{
+			if (_shutdownNotificationSent)
+				return;
+
+			_shutdownNotificationSent = true;
+
+			WindowsToastNotifier.TryRemoveStatus();
+			WindowsToastNotifier.TryClearLimits();
+
+			string eventMessage = L10n.Text("AppEventInactive");
+			if (_settings.NotifyBalloon)
+				WindowsToastNotifier.TryShowStatus(L10n.Text("AppTitle"), eventMessage);
+
+			if (_settings.NtfyEnabled)
+			{
+				// Beim Prozessende kurz synchron warten, damit der Status-Push nicht
+				// mit dem Beenden der Anwendung abgeschnitten wird.
+				using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+				{
+					try
+					{
+						SendNtfyStatusAsync(L10n.Text("AppNtfyInactive"), timeout.Token)
+							.GetAwaiter()
+							.GetResult();
+					}
+					catch
+					{
+						// Push-Fehler dürfen das Beenden nie blockieren.
+					}
+				}
+			}
+		}
+
+		private async Task SendNtfyStatusAsync(
+			string message,
+			CancellationToken cancellationToken)
+		{
+			string topic = _settings.NtfyTopic?.Trim();
+			string url = (_settings.NtfyUrl?.TrimEnd('/') ?? "https://ntfy.sh");
+			if (string.IsNullOrEmpty(topic)) return;
+
+			try
+			{
+				string requestUrl =
+					$"{url}/{topic}?title={Uri.EscapeDataString(L10n.Text("AppTitle"))}";
+
+				using (var req = new System.Net.Http.HttpRequestMessage(
+					System.Net.Http.HttpMethod.Post,
+					requestUrl))
+				{
+					req.Content = new System.Net.Http.StringContent(
+						message ?? "",
+						System.Text.Encoding.UTF8,
+						"text/plain");
+
+					await _ntfyClient
+						.SendAsync(req, cancellationToken)
+						.ConfigureAwait(false);
+				}
+			}
+			catch
+			{
+				// Push-Fehler nie zum Absturz führen lassen.
+			}
+		}
+
 		private async Task SendNtfyAsync(
-			WatchlistEntry entry,
-			bool isUpperAlarm,
-			string title,
-			string entryTypeLine,
-			string limitText,
-			string currentText)
+			string notificationTitle,
+			string securityLine,
+			string limitLine,
+			string currentLine)
 		{
 			string topic = _settings.NtfyTopic?.Trim();
 			string url   = (_settings.NtfyUrl?.TrimEnd('/') ?? "https://ntfy.sh");
@@ -1378,13 +1880,13 @@ namespace StockWatcher
 
 			try
 			{
-				string direction = isUpperAlarm ? L10n.Text("UpperLimitArrow") : L10n.Text("LowerLimitArrow");
-
 				// ntfy: Titel bewusst als echter Titelparameter übertragen.
-				// Uri.EscapeDataString gehört in die URL, nicht in den HTTP-Header;
-				// so zeigt ntfy Leerzeichen/Umlaute korrekt statt als %20/%C3... an.
-				string notificationTitle = L10n.Format("TrayBalloonAlarm", title, entry.Name);
-				string body = $"{entryTypeLine}{Environment.NewLine}{L10n.Format("AlarmReached", direction, limitText, currentText)}";
+				// Der native Titel wird von ntfy hervorgehoben und enthält deshalb
+				// Eintragsart + Warnungstyp. Der Nachrichtentext bleibt Plain Text,
+				// damit Android-Clients keine Markdown-Markierungen anzeigen.
+				string body =
+					$"{securityLine}{Environment.NewLine}{Environment.NewLine}" +
+					$"{limitLine}{Environment.NewLine}{currentLine}";
 				string requestUrl = $"{url}/{topic}?title={Uri.EscapeDataString(notificationTitle)}&priority=high";
 
 				var req = new System.Net.Http.HttpRequestMessage(
@@ -1752,11 +2254,34 @@ namespace StockWatcher
 
 		private void OpenSettings(object sender, EventArgs e)
 		{
+			HashSet<string> previousToastTags = GetAlarmToastTags(_settings.Watchlist);
+
 			using (var form = new SettingsForm(_settings))
 			{
 				if (form.ShowDialog(this) == DialogResult.OK)
 				{
 					_settings = form.Settings;
+
+					HashSet<string> currentToastTags = GetAlarmToastTags(_settings.Watchlist);
+					foreach (string previousTag in previousToastTags)
+					{
+						if (!currentToastTags.Contains(previousTag))
+							WindowsToastNotifier.TryRemoveLimit(previousTag);
+					}
+
+					if (!_settings.NotifyBalloon)
+					{
+						foreach (string currentTag in currentToastTags)
+							WindowsToastNotifier.TryRemoveLimit(currentTag);
+						WindowsToastNotifier.TryRemoveStatus();
+					}
+					else
+					{
+						WindowsToastNotifier.TryShowStatus(
+							L10n.Text("AppTitle"),
+							L10n.Text("AppEventActive"));
+					}
+
 					_settings.Save();
 					ApplyInterval();
 					RefreshListView();
@@ -1768,6 +2293,15 @@ namespace StockWatcher
 		// Fenster schliessen → in Tray minimieren
 		// -----------------------------------------------------------------------
 
+		private void ExitApplication()
+		{
+			// Explizites "Beenden": Status/History vor dem Beenden abschließen.
+			// FormClosing ruft dieselbe Routine als Fallback nochmals auf; der
+			// _shutdownNotificationSent-Guard verhindert Doppelmeldungen.
+			PublishApplicationInactiveStatus();
+			Application.Exit();
+		}
+
 		private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
 		{
 			SaveUiLayout();
@@ -1776,9 +2310,15 @@ namespace StockWatcher
 			{
 				e.Cancel = true;
 				Hide();
-				_notifyIcon.ShowBalloonTip(1000, L10n.Text("AppTitle"),
-					L10n.Text("TrayBackground"), ToolTipIcon.Info);
+
+				// Kein klassischer NotifyIcon-Balloon: dessen Anzeigezeit wird von
+				// Windows weitgehend ignoriert. Der WinRT-Hinweis verfällt nach 1 s.
+				WindowsToastNotifier.TryShowTransient(
+					L10n.Text("AppToastBackground"));
+				return;
 			}
+
+			PublishApplicationInactiveStatus();
 		}
 
 		protected override void Dispose(bool disposing)
@@ -1793,6 +2333,7 @@ namespace StockWatcher
 				_timer?.Dispose();
 				_countdownTimer?.Dispose();
 				_layoutSaveTimer?.Dispose();
+				_selectAllToolbarImage?.Dispose();
 				_dotIcon?.Dispose();
 				// _baseIcon ist als Embedded Resource geöffnet, nicht self-owned → kein Dispose
 			}

@@ -30,6 +30,7 @@ namespace StockWatcher.Forms
 		private TextBox       _txtReferencePrice;
 		private ComboBox      _cmbReferenceCurrency;
 		private TextBox       _txtReferenceDate;
+		private Button        _btnReferenceDateToday;
 		private Label         _lblFxRate;
 		private TextBox       _txtIncomeEur;
 		private TextBox       _txtSalePrice;
@@ -260,16 +261,29 @@ namespace StockWatcher.Forms
 			_cmbReferenceCurrency.SelectedIndexChanged += async (s, e) => await TriggerFxLookupAsync();
 			grpPosition.Controls.Add(_cmbReferenceCurrency);
 
-			grpPosition.Controls.Add(MakeLbl(L10n.Text("LabelReferenceDate"), 405, 69, 135, font));
+			grpPosition.Controls.Add(MakeLbl(L10n.Text("LabelReferenceDate"), 390, 69, 150, font));
 			_txtReferenceDate = new TextBox
 			{
 				Location = new Point(544, 65),
-				Width = 100,
+				Width = 75,
 				Font = font
 			};
 			_txtReferenceDate.Leave += CmbOrDate_Leave;
 			grpPosition.Controls.Add(_txtReferenceDate);
-			grpPosition.Controls.Add(MakeLbl("dd.MM.yyyy", 651, 69, 60, fontSm, Color.Gray));
+
+			_btnReferenceDateToday = new Button
+			{
+				Text = L10n.Text("ButtonToday"),
+				Location = new Point(625, 63),
+				Size = new Size(77, 28),
+				Font = font
+			};
+			_btnReferenceDateToday.Click += async (s, e) =>
+			{
+				_txtReferenceDate.Text = DateTime.Today.ToString("dd.MM.yyyy");
+				await TriggerFxLookupAsync();
+			};
+			grpPosition.Controls.Add(_btnReferenceDateToday);
 
 			_lblFxRate = new Label
 			{

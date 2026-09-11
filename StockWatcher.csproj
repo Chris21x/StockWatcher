@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -10,10 +10,11 @@
     <LangVersion>9.0</LangVersion>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <NeutralLanguage>en</NeutralLanguage>
-    <Version>1.1.5</Version>
-    <AssemblyVersion>1.1.5.0</AssemblyVersion>
-    <FileVersion>1.1.5.0</FileVersion>
+    <Version>1.1.16</Version>
+    <AssemblyVersion>1.1.16.0</AssemblyVersion>
+    <FileVersion>1.1.16.0</FileVersion>
     <AppConfig>App.config</AppConfig>
+
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,11 +25,20 @@
     <!-- System.Net.Http ist in .NET Framework 4.8 im GAC, muss aber explizit referenziert werden -->
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Configuration" />
+
   </ItemGroup>
 
   <ItemGroup>
     <!-- Newtonsoft.Json: zuverlässig für .NET Framework 4.8 ohne Abhängigkeitskonflikte -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+
+    <!--
+      Offizielles Microsoft WinRT API Pack für klassische .NET-Framework-Desktop-Apps.
+      Keine lokalen Windows-SDK-/Windows.winmd-Pfade; NuGet Restore stellt die
+      WinRT-Projektionen für Windows.Data.Xml.Dom / Windows.UI.Notifications bereit.
+      10.0.19041.x entspricht Windows 10 Version 2004 als API-Vertragsbasis.
+    -->
+    <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.19041.2" />
   </ItemGroup>
 
   <!--

@@ -1,0 +1,2 @@
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path . -Recurse -File | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue }"
+PAUSE

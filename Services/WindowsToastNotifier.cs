@@ -1,24 +1,52 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using Windows.Data.Xml.Dom;
+using Windows.UI.Notifications;
 
 namespace StockWatcher.Services
 {
 	/// <summary>
-	/// Windows-Toast-Benachrichtigungen für die klassische, nicht paketierte
+	/// Windows-Toast-Benachrichtigungen für die portable
 	/// .NET-Framework-Desktopanwendung.
 	///
-	/// Es werden bewusst keine zusätzlichen NuGet-Abhängigkeiten benötigt.
-	/// Für Desktop-Toasts registriert sich StockWatcher per-user über eine
-	/// Startmenü-Verknüpfung mit stabiler AppUserModelID.
+	/// Registrierung:
+	/// - stabile AppUserModelID am Prozess
+	/// - Startmenü-Verknüpfung mit derselben AppUserModelID
+	/// - ToastNotificationManager.CreateToastNotifier(AppUserModelID)
+	///
+	/// WinRT wird bewusst typisiert verwendet. Der frühere Reflection-Weg
+	/// über Type.InvokeMember() funktioniert bei den WinRT-COM-Objekten nicht,
+	/// weil diese kein klassisches IDispatch implementieren.
 	/// </summary>
 	internal static class WindowsToastNotifier
 	{
 		private const string AppUserModelId = "StockWatcher.Desktop";
+		private const string LimitGroup = "limits";
+		private const string StatusGroup = "status";
+		private const string TransientGroup = "transient";
+		private const string StatusTag = "appstatus";
+		private const string TransientTag = "background";
+
+		private static readonly object ToastSyncRoot = new object();
+		private sealed class LimitNotificationState
+		{
+			public int Generation { get; set; }
+			public bool PopupPending { get; set; }
+			public string EventTitle { get; set; } = "";
+			public string EventSecurity { get; set; } = "";
+			public string EventDetails { get; set; } = "";
+		}
+
+		private static readonly Dictionary<string, ToastNotification> ActiveToasts =
+			new Dictionary<string, ToastNotification>(StringComparer.Ordinal);
+		private static readonly Dictionary<string, LimitNotificationState> LimitStates =
+			new Dictionary<string, LimitNotificationState>(StringComparer.Ordinal);
+		private static int _limitGeneration;
 		private static bool _shortcutPrepared;
 
 		public static void InitializeProcessIdentity()
@@ -26,70 +54,366 @@ namespace StockWatcher.Services
 			try
 			{
 				SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+				EnsureStartMenuShortcut();
 			}
 			catch
 			{
-				// Auf Systemen ohne passende Shell-Unterstützung bleibt später
+				// Falls WinRT/Shell nicht verfügbar ist, bleibt beim neuen Alarm
 				// der bestehende NotifyIcon-Balloon als Fallback verfügbar.
 			}
 		}
 
-		public static bool TryShow(string title, string subtitle, string body)
+		/// <summary>
+		/// Zeigt einen neuen Limit-Toast oder ersetzt einen vorhandenen Eintrag.
+		/// suppressPopup=true aktualisiert nur das Benachrichtigungszentrum.
+		/// </summary>
+		/// <summary>
+		/// Zeigt einen neuen Alarm als sichtbaren Popup-Toast. Nach dem Ende des
+		/// Popups wird derselbe Tag lautlos durch den separat formatierten
+		/// Ereignis-Eintrag ersetzt.
+		/// </summary>
+		public static bool TryShowLimitPopup(
+			string tag,
+			string toastTitle,
+			string toastSecurity,
+			string toastLimit,
+			string toastCurrent,
+			string eventTitle,
+			string eventSecurity,
+			string eventDetails)
+		{
+			string normalizedTag = NormalizeTag(tag);
+			string normalizedGroup = NormalizeGroup(LimitGroup);
+			int generation;
+
+			lock (ToastSyncRoot)
+			{
+				generation = ++_limitGeneration;
+				LimitStates[normalizedTag] = new LimitNotificationState
+				{
+					Generation = generation,
+					PopupPending = true,
+					EventTitle = eventTitle ?? "",
+					EventSecurity = eventSecurity ?? "",
+					EventDetails = eventDetails ?? ""
+				};
+			}
+
+			try
+			{
+				EnsureStartMenuShortcut();
+
+				XmlDocument toastXml =
+					ToastNotificationManager.GetTemplateContent(ToastTemplateType.ToastText02);
+
+				XmlNodeList textNodes = toastXml.GetElementsByTagName("text");
+				if (textNodes == null || textNodes.Length < 2)
+					return false;
+
+				string body =
+					$"{toastSecurity}{Environment.NewLine}{Environment.NewLine}" +
+					$"{toastLimit}{Environment.NewLine}{toastCurrent}";
+
+				textNodes[0].AppendChild(toastXml.CreateTextNode(toastTitle ?? ""));
+				textNodes[1].AppendChild(toastXml.CreateTextNode(body));
+
+				var toast = new ToastNotification(toastXml)
+				{
+					Tag = normalizedTag,
+					Group = normalizedGroup,
+					ExpirationTime = DateTimeOffset.Now.AddHours(12),
+					SuppressPopup = false
+				};
+
+				toast.Dismissed += (sender, args) =>
+					HandleLimitPopupDismissed(normalizedTag, generation);
+
+				ToastNotifier toastNotifier =
+					ToastNotificationManager.CreateToastNotifier(AppUserModelId);
+				toastNotifier.Show(toast);
+
+				lock (ToastSyncRoot)
+				{
+					ActiveToasts[GetActiveToastKey(normalizedGroup, normalizedTag)] = toast;
+				}
+
+				return true;
+			}
+			catch (Exception ex)
+			{
+				lock (ToastSyncRoot)
+				{
+					if (LimitStates.TryGetValue(normalizedTag, out LimitNotificationState state) &&
+						state.Generation == generation)
+					{
+						LimitStates.Remove(normalizedTag);
+					}
+				}
+
+				Debug.WriteLine($"[Toast] {ex.GetType().Name}: {ex.Message}");
+				return false;
+			}
+		}
+
+		/// <summary>
+		/// Aktualisiert nur den Ereignis-Eintrag eines bereits ausgelösten Alarms.
+		/// Solange dessen Popup noch sichtbar ist, werden lediglich die neuesten
+		/// Ereignisdaten vorgemerkt und erst nach Dismissed geschrieben.
+		/// </summary>
+		public static bool TryRefreshLimitEvent(
+			string tag,
+			string eventTitle,
+			string eventSecurity,
+			string eventDetails)
+		{
+			string normalizedTag = NormalizeTag(tag);
+			bool popupPending;
+
+			lock (ToastSyncRoot)
+			{
+				if (!LimitStates.TryGetValue(normalizedTag, out LimitNotificationState state))
+				{
+					state = new LimitNotificationState
+					{
+						Generation = ++_limitGeneration,
+						PopupPending = false
+					};
+					LimitStates[normalizedTag] = state;
+				}
+
+				state.EventTitle = eventTitle ?? "";
+				state.EventSecurity = eventSecurity ?? "";
+				state.EventDetails = eventDetails ?? "";
+				popupPending = state.PopupPending;
+			}
+
+			if (popupPending)
+				return true;
+
+			return TryShowLimitEventCore(
+				normalizedTag,
+				eventTitle,
+				eventSecurity,
+				eventDetails);
+		}
+
+		private static void HandleLimitPopupDismissed(string normalizedTag, int generation)
+		{
+			string eventTitle;
+			string eventSecurity;
+			string eventDetails;
+
+			lock (ToastSyncRoot)
+			{
+				if (!LimitStates.TryGetValue(normalizedTag, out LimitNotificationState state) ||
+					state.Generation != generation)
+				{
+					return;
+				}
+
+				state.PopupPending = false;
+				eventTitle = state.EventTitle;
+				eventSecurity = state.EventSecurity;
+				eventDetails = state.EventDetails;
+			}
+
+			TryShowLimitEventCore(
+				normalizedTag,
+				eventTitle,
+				eventSecurity,
+				eventDetails);
+		}
+
+		private static bool TryShowLimitEventCore(
+			string normalizedTag,
+			string eventTitle,
+			string eventSecurity,
+			string eventDetails)
 		{
 			try
 			{
 				EnsureStartMenuShortcut();
 
-				string xml =
-					"<toast duration=\"long\">" +
-					"<visual><binding template=\"ToastGeneric\">" +
-					$"<text>{EscapeXml(title)}</text>" +
-					$"<text>{EscapeXml(subtitle)}</text>" +
-					$"<text>{EscapeXml(body)}</text>" +
-					"</binding></visual>" +
-					"</toast>";
+				XmlDocument toastXml = new XmlDocument();
+				toastXml.LoadXml(
+					"<toast>" +
+					"<visual>" +
+					"<binding template=\"ToastGeneric\">" +
+					"<text hint-maxLines=\"1\"></text>" +
+					"<text hint-maxLines=\"2\"></text>" +
+					"<text hint-maxLines=\"2\"></text>" +
+					"</binding>" +
+					"</visual>" +
+					"</toast>");
 
-				Type xmlDocumentType = Type.GetType(
-					"Windows.Data.Xml.Dom.XmlDocument, Windows.Data, ContentType=WindowsRuntime",
-					throwOnError: false);
-				Type toastNotificationType = Type.GetType(
-					"Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType=WindowsRuntime",
-					throwOnError: false);
-				Type toastManagerType = Type.GetType(
-					"Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime",
-					throwOnError: false);
-
-				if (xmlDocumentType == null || toastNotificationType == null || toastManagerType == null)
+				XmlNodeList textNodes = toastXml.GetElementsByTagName("text");
+				if (textNodes == null || textNodes.Length < 3)
 					return false;
 
-				object xmlDocument = Activator.CreateInstance(xmlDocumentType);
-				xmlDocumentType.InvokeMember(
-					"LoadXml",
-					BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance,
-					null,
-					xmlDocument,
-					new object[] { xml });
+				textNodes[0].AppendChild(toastXml.CreateTextNode(eventTitle ?? ""));
 
-				object toast = Activator.CreateInstance(
-					toastNotificationType,
-					new object[] { xmlDocument });
+				// Windows erlaubt für die beiden Beschreibungselemente zusammen
+				// maximal vier sichtbare Zeilen. Genau diese vier werden genutzt:
+				// Valor + Leerzeile sowie Limit + Ist-Wert.
+				textNodes[1].AppendChild(
+					toastXml.CreateTextNode(
+						(eventSecurity ?? "") + Environment.NewLine + "\u00A0"));
+				textNodes[2].AppendChild(
+					toastXml.CreateTextNode(eventDetails ?? ""));
 
-				object notifier = toastManagerType.InvokeMember(
-					"CreateToastNotifier",
-					BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Static,
-					null,
-					null,
-					new object[] { AppUserModelId });
+				string normalizedGroup = NormalizeGroup(LimitGroup);
+				var toast = new ToastNotification(toastXml)
+				{
+					Tag = normalizedTag,
+					Group = normalizedGroup,
+					ExpirationTime = DateTimeOffset.Now.AddHours(12),
+					SuppressPopup = true
+				};
 
-				if (notifier == null || toast == null)
+				ToastNotifier toastNotifier =
+					ToastNotificationManager.CreateToastNotifier(AppUserModelId);
+				toastNotifier.Show(toast);
+
+				lock (ToastSyncRoot)
+				{
+					ActiveToasts[GetActiveToastKey(normalizedGroup, normalizedTag)] = toast;
+				}
+
+				return true;
+			}
+			catch (Exception ex)
+			{
+				Debug.WriteLine($"[ToastHistory] {ex.GetType().Name}: {ex.Message}");
+				return false;
+			}
+		}
+
+		/// <summary>
+		/// Schreibt den aktuellen Programmstatus ausschließlich in die
+		/// Windows-Ereignisliste / das Benachrichtigungszentrum.
+		/// </summary>
+		public static bool TryShowStatus(string title, string message)
+		{
+			return TryShowSingleLineCore(
+				StatusTag,
+				StatusGroup,
+				message,
+				suppressPopup: true,
+				expirationTime: null);
+		}
+
+		/// <summary>
+		/// Kurzer Hinweis beim Schließen des Hauptfensters in den Tray.
+		/// ExpirationTime ist bewusst 1 Sekunde: Windows bietet keine eigene
+		/// millisekundengenaue Popup-Dauer unabhängig von der Gültigkeit.
+		/// </summary>
+		public static bool TryShowTransient(string message)
+		{
+			return TryShowSingleLineCore(
+				TransientTag,
+				TransientGroup,
+				message,
+				suppressPopup: false,
+				expirationTime: DateTimeOffset.Now.AddSeconds(1));
+		}
+
+		public static bool TryRemoveLimit(string tag)
+		{
+			string normalizedTag = NormalizeTag(tag);
+			lock (ToastSyncRoot)
+			{
+				LimitStates.Remove(normalizedTag);
+			}
+
+			return TryRemoveCore(normalizedTag, LimitGroup);
+		}
+
+		public static bool TryRemoveStatus()
+		{
+			return TryRemoveCore(StatusTag, StatusGroup);
+		}
+
+		public static bool TryClearLimits()
+		{
+			try
+			{
+				try
+				{
+					ToastNotificationManager.History.RemoveGroup(
+						LimitGroup,
+						AppUserModelId);
+				}
+				catch
+				{
+					ToastNotificationManager.History.RemoveGroup(LimitGroup);
+				}
+
+				lock (ToastSyncRoot)
+				{
+					LimitStates.Clear();
+
+					string prefix = LimitGroup + "|";
+					var keysToRemove = new List<string>();
+					foreach (string key in ActiveToasts.Keys)
+					{
+						if (key.StartsWith(prefix, StringComparison.Ordinal))
+							keysToRemove.Add(key);
+					}
+
+					foreach (string key in keysToRemove)
+						ActiveToasts.Remove(key);
+				}
+
+				return true;
+			}
+			catch (Exception ex)
+			{
+				Debug.WriteLine($"[ToastHistory] {ex.GetType().Name}: {ex.Message}");
+				return false;
+			}
+		}
+
+		private static bool TryShowSingleLineCore(
+			string tag,
+			string group,
+			string message,
+			bool suppressPopup,
+			DateTimeOffset? expirationTime)
+		{
+			try
+			{
+				EnsureStartMenuShortcut();
+
+				XmlDocument toastXml =
+					ToastNotificationManager.GetTemplateContent(ToastTemplateType.ToastText01);
+
+				XmlNodeList textNodes = toastXml.GetElementsByTagName("text");
+				if (textNodes == null || textNodes.Length < 1)
 					return false;
 
-				notifier.GetType().InvokeMember(
-					"Show",
-					BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance,
-					null,
-					notifier,
-					new object[] { toast });
+				textNodes[0].AppendChild(toastXml.CreateTextNode(message ?? ""));
+
+				string normalizedTag = NormalizeTag(tag);
+				string normalizedGroup = NormalizeGroup(group);
+
+				var toast = new ToastNotification(toastXml)
+				{
+					Tag = normalizedTag,
+					Group = normalizedGroup,
+					SuppressPopup = suppressPopup
+				};
+
+				if (expirationTime.HasValue)
+					toast.ExpirationTime = expirationTime.Value;
+
+				ToastNotifier notifier =
+					ToastNotificationManager.CreateToastNotifier(AppUserModelId);
+				notifier.Show(toast);
+
+				lock (ToastSyncRoot)
+				{
+					ActiveToasts[GetActiveToastKey(normalizedGroup, normalizedTag)] = toast;
+				}
 
 				return true;
 			}
@@ -98,6 +422,65 @@ namespace StockWatcher.Services
 				Debug.WriteLine($"[Toast] {ex.GetType().Name}: {ex.Message}");
 				return false;
 			}
+		}
+
+
+		private static bool TryRemoveCore(string tag, string group)
+		{
+			try
+			{
+				string normalizedTag = NormalizeTag(tag);
+				string normalizedGroup = NormalizeGroup(group);
+
+				try
+				{
+					ToastNotificationManager.History.Remove(
+						normalizedTag,
+						normalizedGroup,
+						AppUserModelId);
+				}
+				catch
+				{
+					ToastNotificationManager.History.Remove(
+						normalizedTag,
+						normalizedGroup);
+				}
+
+				lock (ToastSyncRoot)
+				{
+					ActiveToasts.Remove(GetActiveToastKey(normalizedGroup, normalizedTag));
+				}
+
+				return true;
+			}
+			catch (Exception ex)
+			{
+				Debug.WriteLine($"[ToastHistory] {ex.GetType().Name}: {ex.Message}");
+				return false;
+			}
+		}
+
+		private static string GetActiveToastKey(string group, string tag)
+		{
+			return group + "|" + tag;
+		}
+
+		private static string NormalizeGroup(string group)
+		{
+			string value = (group ?? "").Trim();
+			if (value.Length == 0)
+				throw new ArgumentException("Toast group must not be empty.", nameof(group));
+
+			return value.Length <= 16 ? value : value.Substring(0, 16);
+		}
+
+		private static string NormalizeTag(string tag)
+		{
+			string value = (tag ?? "").Trim();
+			if (value.Length == 0)
+				throw new ArgumentException("Toast tag must not be empty.", nameof(tag));
+
+			return value.Length <= 16 ? value : value.Substring(0, 16);
 		}
 
 		private static void EnsureStartMenuShortcut()
@@ -124,8 +507,9 @@ namespace StockWatcher.Services
 				var shellLink = (IShellLinkW)shellLinkObject;
 
 				ThrowOnFailure(shellLink.SetPath(exePath));
+				ThrowOnFailure(shellLink.SetArguments(""));
 				ThrowOnFailure(shellLink.SetWorkingDirectory(workingDirectory));
-				ThrowOnFailure(shellLink.SetDescription("Stock Watcher"));
+				ThrowOnFailure(shellLink.SetDescription("StockWatcher"));
 				ThrowOnFailure(shellLink.SetIconLocation(exePath, 0));
 				ThrowOnFailure(shellLink.SetShowCmd(1));
 
@@ -150,11 +534,6 @@ namespace StockWatcher.Services
 				if (shellLinkObject != null && Marshal.IsComObject(shellLinkObject))
 					Marshal.FinalReleaseComObject(shellLinkObject);
 			}
-		}
-
-		private static string EscapeXml(string value)
-		{
-			return System.Security.SecurityElement.Escape(value ?? "") ?? "";
 		}
 
 		private static void ThrowOnFailure(int hResult)
